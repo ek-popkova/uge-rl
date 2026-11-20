@@ -8,17 +8,21 @@ from typing import Optional
 import gymnasium as gym
 import highway_env  # noqa: F401  (registers the highway environments)
 
-from common.config import BASE_CONFIG, DENSITIES, ENV_ID, REWARDS
+from common.config import BASE_CONFIG, DENSITIES, ENV_ID, REWARDS, TRAIN_DENSITY
 from common.rewards import CustomRewardWrapper
 
 
 def make_env(
-    density: str = "medium",
+    density: str = TRAIN_DENSITY,
     reward: str = "default",
     seed: Optional[int] = None,
     render_mode: Optional[str] = None,
 ) -> gym.Env:
     """Create a HighwayEnv environment with the shared configuration.
+
+    The env config is ``BASE_CONFIG`` with ``DENSITIES[density]`` merged on top (only
+    ``vehicles_density`` differs between densities); every other parameter stays at the
+    highway-fast-v0 default. Nothing is rendered unless ``render_mode`` is given.
 
     Args:
         density: Traffic density preset, one of ``common.config.DENSITIES``.

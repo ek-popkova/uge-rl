@@ -26,7 +26,7 @@ for all experiment code (DDQN/PPO training, evaluation, sweeps):
    (10 -> ~90 steps/s, 40 -> ~21) and `simulation_frequency=15` is ~2.5x slower than the
    `highway-fast-v0` default of 5 (C1, C2). Keep `simulation_frequency=5` and
    `vehicles_count <= 30`: extra vehicles spawn far ahead of the ego and never influence
-   30 s episodes. Re-measure before using any value from `common/config.py`.
+   30 s episodes. The values in `common/config.py` follow this rule (5 Hz, 20 vehicles); re-measure if you change them.
 3. **Never render outside `scripts/record_video.py`.** Use `render_mode=None` for training,
    evaluation and sweeps; no `RecordVideo` or other frame-capturing wrapper outside the
    video script.
@@ -80,14 +80,13 @@ The scripts in `scripts/pilot/` were left unfixed on purpose because that run ha
   `--workers` defaults to `min(12, cpu_count - 2)` (past the scaling knee) and tasks are
   coarse (16 and 12 tasks), leaving workers idle; the extra sweep ran at 92 steps/s vs
   140 achievable.
-- `scripts/pilot/exp3_reward_scale.py:47-49` (C5b, C6): single process, and re-simulates
-  episodes that the main sweep already ran; `scripts/pilot/obs_coverage.py` does the same
-  (36k steps). Fold such metrics into one `run_episode` pass.
+- `scripts/pilot/obs_coverage.py` (C5b, C6): re-simulates episodes that the main sweep already
+  ran (36k steps). Fold such metrics into one `run_episode` pass.
 - All `scripts/pilot/exp*.py` (C7): results are written once at the end, no `--resume`,
   progress counters without ETA.
 - `scripts/pilot/pilot_common.py` and the worker pools: no `OMP_NUM_THREADS` /
   `torch.set_num_threads(1)` handling (harmless for the pilot, required once torch is
   imported).
-- `common/config.py:24,30-31` (C2): placeholders `simulation_frequency=15` and
-  50/80-vehicle presets run at 5.0 and 2.4 steps/s (vs 45-55 for the pilot default).
-  They were left unchanged; recalibrate them before any training.
+- `common/config.py` (C2): **resolved** in the final configuration commit. The former placeholders
+  (`simulation_frequency=15`, 50/80-vehicle presets, 5.0 and 2.4 steps/s) were replaced by the pilot-based values
+  (`simulation_frequency=5`, 20 vehicles; see `docs/config_decisions.md`).
