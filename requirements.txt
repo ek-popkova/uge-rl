@@ -1,0 +1,8 @@
+gymnasium>=1.0.0
+highway-env==1.12.1
+torch>=2.2.0
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+moviepy>=2.0
+tensorboard>=2.15
