@@ -104,7 +104,7 @@ def runs(tmp_path_factory):
 def test_all_files_exist_with_the_right_schema(runs, algo):
     d = runs[algo]
     for name in ("train_log.csv", "update_log.csv", "val_log.csv", "run_meta.json", "final.pt", "resume.pt",
-                 "milestone_10pct.pt", "milestone_50pct.pt"):
+                 "milestone_10pct.pt", "milestone_25pct.pt", "milestone_50pct.pt"):
         assert (d / name).exists(), name
     logs = read_logs(d)
     assert list(logs["train"].columns) == TRAIN_LOG_COLUMNS
@@ -159,6 +159,8 @@ def test_run_meta_has_every_field(runs, algo):
     assert cfg_cls.from_dict(meta["hyperparameters"]).to_dict() == meta["hyperparameters"]
     assert meta["budget"]["total_env_steps"] == TOTAL and set(meta["budget_overrides"]) >= {"total_env_steps"}
     assert any(p.endswith("lr") for p in meta["placeholders_in_use"])
+    # relative hyperparameters are stored as absolute values: DDQN eps_decay_fraction 0.3 x 80 steps, PPO rollout 2 x 10
+    assert meta["resolved"] == ({"eps_decay_steps": 24} if algo == "ddqn" else {"rollout_size": 20})
     env = meta["env"]
     assert env["env_id"] == "highway-fast-v0" and env["config"]["simulation_frequency"] == 5  # resolved config, not BASE_CONFIG
     assert env["config"]["vehicles_density"] == 0.7 and env["config"]["vehicles_count"] == 20
@@ -179,7 +181,7 @@ def test_run_meta_has_every_field(runs, algo):
     assert meta["model"]["n_parameters"] == 4
     inf = meta["inference"]
     assert inf["median_ms"] > 0 and inf["p90_ms"] >= inf["median_ms"] and inf["batch_size"] == 1 and inf["threads"] == 1
-    assert [m["fraction"] for m in meta["milestones"]] == [0.1, 0.5] and meta["logging"]["update_log_every"] in (1, 2)
+    assert [m["fraction"] for m in meta["milestones"]] == [0.1, 0.25, 0.5] and meta["logging"]["update_log_every"] in (1, 2)
 
 
 @pytest.mark.slow
@@ -212,7 +214,7 @@ def test_resume_reproduces_the_uninterrupted_run(runs, tmp_path, algo, interrupt
     meta = json.loads((d / "run_meta.json").read_text())
     assert meta["status"] == "finished" and meta["timing"]["final_env_step"] == TOTAL
     assert len(meta["resumes"]) == 1 and meta["resumes"][0]["env_step"] == first_ckpt
-    assert [m["fraction"] for m in meta["milestones"]] == [0.1, 0.5]  # no duplicates after the resume
+    assert [m["fraction"] for m in meta["milestones"]] == [0.1, 0.25, 0.5]  # no duplicates after the resume
     assert meta["timing"]["start_time"]  # kept from the first start
     assert not read_logs(d)["train"]["env_step"].diff().dropna().lt(0).any()
     # a finished run is not touched by --resume
@@ -313,6 +315,10 @@ def test_placeholders_are_listed_and_overrides_are_not():
     names = placeholders_in_use(DDQNConfig(), TrainBudget())
     assert "DDQNConfig.lr" in names and "TrainBudget.total_env_steps" in names
     assert "DDQNConfig.device" not in names  # decided by CLAUDE.md rule 8
+    # shared decisions are plain defaults now (tests/test_protocol.py)
+    for decided in ("gamma", "hidden_sizes", "activation", "obs_flatten"):
+        assert f"DDQNConfig.{decided}" not in names and f"PPOConfig.{decided}" not in placeholders_in_use(PPOConfig())
+    assert "TrainBudget.milestone_fractions" not in names
     assert "DDQNConfig.lr" not in placeholders_in_use(DDQNConfig(), overridden=["lr"])
     assert set(TARGET_PERFORMANCE) == {"beats_idle", "strong"}  # two pre-registered levels
     assert all(len(conds) >= 2 for conds in TARGET_PERFORMANCE.values())  # joint: safety and efficiency

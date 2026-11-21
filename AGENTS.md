@@ -115,38 +115,65 @@ Rules:
 - **Fixed before training, never changed after seeing results:** `TARGET_PERFORMANCE` (both levels), `TARGET_CONSECUTIVE`, `REVERSAL_WINDOW`,
   `NEAR_MISS_TTC`, the budgets (`TrainBudget`), the validation interval and number of validation
   episodes, the seed sets and test conditions. Any deviation is reported as such.
+- **Shared training decisions are frozen** (table below, `docs/config_decisions.md` "Shared training decisions"): they may
+  only change by team agreement, and a change after the main grid has started is reported as a deviation.
 - **Benchmarks only in a quiet process.** `common.benchmark.measure_env_speed` and `measure_inference`
   run when nothing else is running (rule 1, C8). Wall times of runs that ran in parallel are comparable only
   between runs that ran under the same load; compare `update_time_s` per env step and env steps to the target
   rather than raw wall time.
 - **Variants.** Sensitivity runs use `--set key=value` (recorded in `run_meta.json`) and go to
   `runs/<algo>/<reward>/<variant>/seed<s>`; the main grid is `main`. Never write a sensitivity run into `main`.
+  The 24 sensitivity runs are `common.train_config.expand_sensitivity_grid()` (`SensitivityRun.cli_args()` gives the CLI);
+  their base point is the main-grid run, guarded by `check_sensitivity_run`. Tuning runs are `--variant tune-<name>
+  --seed 99` (`PILOT_RUN_SEED`; reward `balanced`; algorithm-specific keys only; default budget): `load_eval_episodes` and
+  `per_model_table` exclude them, the harness refuses seed 99 outside `tune-*`; selection with
+  `common.aggregate.select_tuning_config`, log in `docs/tuning_log.md`.
+
+### Decided (shared by DDQN and PPO)
+
+Frozen by the team; `common/train_config.py`, `common/networks.py`, `common/config.py`; justifications in
+`docs/config_decisions.md` ("Shared training decisions"). Change only by team agreement.
+
+| Decision | Value |
+|---|---|
+| `gamma` | 0.99 for both |
+| network | MLP `hidden_sizes = (256, 256)`, `activation = "relu"`, input = 5x5 Kinematics flattened to 25 features (`obs_flatten`), no extra normalization; built by `common.networks.build_mlp`; weight initialization is algorithm-specific |
+| same size | DDQN Q-network = PPO actor; the PPO critic is an extra network of the same size, separate from the actor (`ppo_shared_trunk = False`); `check_comparable` checks gamma, `hidden_sizes`, `activation` |
+| tuning | at most 4 configurations per algorithm (defaults + up to 3), algorithm-specific keys only; `PILOT_RUN_SEED = 99`, reward `balanced`, density `medium`, `VAL_SEEDS` only, variant `tune-<name>`; criterion = mean `return_balanced` over the last 3 validation points, ties by lower `crash_rate` |
+| sensitivity | reward `balanced`, density `medium`, main-grid `total_env_steps`, seeds `[0, 1, 2]`, one parameter at a time, every grid RELATIVE to the base value (base is in the grid by construction): lr base x1/3, x1, x3 (both); DDQN `eps_decay_fraction` base -0.2, base, base +0.2; PPO `clip_range` base -0.1, base, base +0.1 (a value outside (0, 1] / (0, 1) raises, never clipped: eps base in (0.2, 0.8], clip base in (0.1, 0.9)); base value = main-grid run (not re-run); 12 runs per algorithm, 24 in total. DDQN decays epsilon over `eps_decay_fraction` x `total_env_steps` (resolved to steps at run start, stored in `run_meta.json` `resolved`) |
+| videos | `milestone_fractions = (0.1, 0.25, 0.5)` + the always-kept final checkpoint; candidate episode seeds shared by both algorithms: both crashed, both completed, and the two disagreement cases (only DDQN / only PPO crashed), `common.failure_cases.video_episode_seeds`; the report video uses training seed 0 of each reward, `main` condition, plus the early / middle milestones (`docs/evaluation_protocol.md` section 11) |
+| derived / engineering (no team decision) | `TARGET_PERFORMANCE["beats_idle"]` = `crash_rate < 0.6` and `mean_speed > 24.8` (idle on `VAL_SEEDS`: 0.6 and 24.7564 m/s, source next to the constant); `checkpoint_every_env_steps = 10,000` (about 10 min of wall time at 12-17 env steps/s per process with 8-12 parallel runs, does not affect results); `update_log_every` K = 100 (DDQN) / 1 (PPO) |
 
 ### TO DECIDE BEFORE TRAINING
 
-Everything below is a PLACEHOLDER (`# PLACEHOLDER: decide before training`): a conventional value that only
+Everything below is still a PLACEHOLDER (`# PLACEHOLDER: decide before training`): a conventional value that only
 keeps the code runnable, not a tuned one. The harness prints `placeholders_in_use` at start and stores it
 in `run_meta.json`. Replace `_ph(...)` by a plain default in `common/train_config.py` once decided.
 
+Shared open items (the team decides them after the pilot runs):
+
 | Item | Where | What it affects |
 |---|---|---|
-| `total_env_steps` (100,000) | `TrainBudget` | training length of every model; same for both algorithms; must be a multiple of the PPO rollout size |
+| `total_env_steps` (100,000) | `TrainBudget` | training length of every model; same for both algorithms; must be a multiple of the PPO rollout size. The DDQN epsilon schedule and its sensitivity grid are fractions of it and follow it |
 | `val_every_env_steps` (5,000), `val_n_episodes` (20 = all `VAL_SEEDS`) | `TrainBudget` | resolution and noise of the learning curves; validation cost |
-| `checkpoint_every_env_steps` (10,000), `milestone_fractions` (0.1, 0.5) | `TrainBudget` | resume granularity (at most this much work lost); which early checkpoints exist for "early vs late" videos |
-| `TARGET_PERFORMANCE` levels `beats_idle` (`crash_rate < 0.6` AND `mean_speed > 24.8`, idle on `VAL_SEEDS`) and `strong` (`crash_rate <= 0.2` AND `mean_speed >= 25.5`), plus `TARGET_CONSECUTIVE` (2) | `common/config.py` | the "env steps to reach a target" metric (computational cost comparison). Both levels are reported for every run, so an unreachable `strong` does not leave the comparison empty; the target must hold at `TARGET_CONSECUTIVE` validation points in a row (one lucky point of 20 episodes must not count). Joint on purpose: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone is met without learning. Both levels must stay unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit |
-| DDQN: `lr, gamma, buffer_size, batch_size, learning_starts, train_freq, gradient_steps, target_update_interval, tau, eps_start, eps_end, eps_decay_steps, max_grad_norm, hidden_sizes` | `DDQNConfig` | final performance and stability; `gamma >= MIN_GAMMA` is enforced |
-| PPO: `lr, gamma, gae_lambda, clip_range, n_envs, n_steps, n_epochs, minibatch_size, ent_coef, vf_coef, max_grad_norm, target_kl, hidden_sizes` | `PPOConfig` | same; `n_envs * n_steps` is the rollout size and the step granularity |
-| `hidden_sizes` must be equal for both (`check_comparable`) | both configs | fair comparison (network size) |
-| Sensitivity grid per algorithm (not defined yet): lr, gamma, DDQN epsilon schedule (`eps_decay_steps`, `eps_end`), PPO `clip_range` | `--set` runs, 3 seeds each | assignment point 7; each setting costs `3 x (T + validation)` steps |
-| `update_log_every` K (DDQN 100, PPO 1) | CLI default (`common.training.DEFAULT_UPDATE_LOG_EVERY`) | size of `update_log.csv` only |
+| `TARGET_PERFORMANCE["strong"]` (`crash_rate <= 0.2` AND `mean_speed >= 25.5`) and `TARGET_CONSECUTIVE` (2) | `common/config.py` | the "env steps to reach a target" metric (computational cost comparison). Both levels are reported for every run, so an unreachable `strong` does not leave the comparison empty; the target must hold at `TARGET_CONSECUTIVE` validation points in a row (one lucky point of 20 episodes must not count). Joint on purpose: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone is met without learning. Both levels must stay unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit |
+
+These five are the only shared open items; everything else below is algorithm-specific.
+
+Algorithm-specific hyperparameters stay with each algorithm's owner (tuned within the tuning budget above):
+
+| Item | Where | What it affects |
+|---|---|---|
+| DDQN: `lr, buffer_size, batch_size, learning_starts, train_freq, gradient_steps, target_update_interval, tau, eps_start, eps_end, eps_decay_fraction (0.3), max_grad_norm` | `DDQNConfig` | final performance and stability. `lr` and `eps_decay_fraction` are the bases of their sensitivity grids (eps base must stay in (0.2, 0.8]) |
+| PPO: `lr, gae_lambda, clip_range, n_envs, n_steps, n_epochs, minibatch_size, ent_coef, vf_coef, max_grad_norm, target_kl` | `PPOConfig` | same; `n_envs * n_steps` is the rollout size and the step granularity. `lr` and `clip_range` are the bases of their sensitivity grids (clip base must stay in (0.1, 0.9)) |
 
 Runtime implication. Aggregate throughput here is about 140 env steps/s with 8-12 processes (80-180 depending on
 the session, `docs/performance_analysis.md` C5, C8), so every 1 M simulated steps cost about 2 h. One
 model costs `T + n_val x val_n_episodes x 30` simulated steps, with `n_val = T / val_every` (`TrainBudget.n_val_points`).
 With the placeholders (T = 100,000, 20 validations x 20 episodes x 30 steps = 12,000 steps) that is 112,000
 steps; the 40 main-grid models are 4.5 M steps, about 9 h at 140 steps/s (13 h at 92). The sensitivity runs come
-on top: e.g. 4 hyperparameters x 2 non-default values x 3 seeds = 24 runs per algorithm, 2.7 M steps each,
-about 11 h for both. Network updates and the `EpisodeRecorder` overhead (measured: see `README.md`, Training)
+on top: 12 runs per algorithm, 24 in total (`expand_sensitivity_grid`), 2.7 M steps, about 5.4 h for both; tuning adds at most
+4 runs per algorithm, 8 in total, 0.9 M steps, about 1.8 h. Network updates and the `EpisodeRecorder` overhead (measured: see `README.md`, Training)
 are not included. `TrainingRun` prints its own simulation-only estimate from a quiet benchmark before
 starting and refuses above `--max-minutes` (default 45) without `--force`.
 
@@ -160,7 +187,8 @@ starting and refuses above `--max-minutes` (default 45) without `--force`.
   conditions on `TEST_SEEDS`, `save_eval`, with `variant`); not written because no agent can be loaded yet.
 - [ ] "Does a higher return mean better driving?": needs trained models. Compare the ranking by `return_<preset>`
   with the behavioural metrics (crash rate, completion, mean speed, near-miss, lane changes) across the four reward presets.
-- [ ] Hyperparameter sensitivity: choose the grid (table above), run 3 seeds per setting, report separately from the main grid.
+- [ ] Hyperparameter tuning (`docs/tuning_log.md`) and sensitivity (the 24 runs of `expand_sensitivity_grid()`, 3 seeds per
+  setting; run `check_sensitivity_runs` before building the table), reported separately from the main grid.
 - [ ] Cost comparison: run the quiet benchmarks (`quiet_benchmark_steps_per_s`, `inference` in `run_meta.json`) in a quiet process;
   runs trained in parallel have disturbed wall times (C8).
 - [ ] Critical discussion (limitations: 5 Hz fast simulator, one training density, 5 seeds, placeholder-derived hyperparameters).
@@ -205,7 +233,8 @@ Still to add when the algorithms are implemented (each needs the real `DDQNTrain
 - [ ] PPO clipped objective on a toy case (ratios inside and outside the clip range, both advantage signs), the `approx_kl` /
   `clip_fraction` definitions, and the KL early stop (`n_epochs_done < n_epochs` when `approx_kl` exceeds `target_kl`).
 - [ ] `save` / `load` round trip gives identical actions for a fixed observation batch; `act(obs, deterministic=True)` is
-  deterministic; parameter count equals `n_parameters()`; `hidden_sizes` equal for both algorithms (`check_comparable`).
+  deterministic; parameter count equals `n_parameters()` (DDQN: 73,733 = `build_action_network`; PPO: actor 73,733 + critic 72,705,
+  both from `common.networks`); `hidden_sizes` equal for both algorithms (`check_comparable`).
 - [ ] The real trainers pass the same harness tests as `RandomTrainer` (files, schemas, resume equals an uninterrupted run,
   monotonic `env_step`, `--workers 1` equals `--workers 2`: parametrize the existing harness tests over the trainer class), and a run
   is reproducible for a fixed seed.

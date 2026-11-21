@@ -18,6 +18,10 @@ live on different scales (a crash costs 15, 20 or 30). Compare reward presets by
 metrics (crash rate, completion rate, mean speed, lane changes, near-miss rate, crashes per km).
 The level-1 column ``return_own`` is the return under the preset the model was trained with.
 
+Tuning runs (variant ``tune-<name>``) never enter these tables (``per_model_table`` drops them by default); the tuning
+selection is ``select_tuning_config``. Sensitivity runs take their base point from the main grid
+(``check_sensitivity_runs`` fails if the non-varied parameters differ).
+
 Training curves (``val_log.csv``, one file per run): ``steps_to_threshold`` (env steps and training
 wall time until each pre-registered level of ``TARGET_PERFORMANCE`` holds at ``TARGET_CONSECUTIVE`` validation points in a row), ``learning_curve_table``
 (mean and 95% t-interval over seeds per validation point) and ``curve_auc`` /
@@ -28,14 +32,23 @@ index, not by env step (PPO's validation steps differ slightly between runs).
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
-from common.config import TARGET_CONSECUTIVE, TARGET_PERFORMANCE
+from common.config import (
+    SENSITIVITY_REWARD,
+    TARGET_CONSECUTIVE,
+    TARGET_PERFORMANCE,
+    TUNING_CRITERION_COLUMN,
+    TUNING_CRITERION_LAST_POINTS,
+    TUNING_MAX_CONFIGS,
+)
 from common.metrics import add_return_columns, summarize_metrics
-from common.paths import MAIN_VARIANT
+from common.paths import ALGORITHMS, MAIN_VARIANT, RESULTS_DIR, is_tuning_variant, run_meta_path
+from common.train_config import check_sensitivity_run
 
 MODEL_KEYS = ["algorithm", "train_reward", "variant", "train_seed", "condition"]
 GROUP_KEYS = ["algorithm", "train_reward", "variant", "condition"]
@@ -50,8 +63,10 @@ _T_975 = (
 _Z_975 = 1.959963984540054
 
 
-def per_model_table(episodes: pd.DataFrame) -> pd.DataFrame:
+def per_model_table(episodes: pd.DataFrame, include_tuning: bool = False) -> pd.DataFrame:
     """Level 1: one row per (algorithm, train_reward, train_seed, condition).
+
+    Rows of tuning runs (variant ``tune-<name>``) are dropped unless ``include_tuning``: they never enter a result table.
 
     ``episodes`` is the concatenation of the per-episode CSVs with the columns ``algorithm``,
     ``train_reward``, ``variant``, ``train_seed`` and ``condition`` added
@@ -59,6 +74,8 @@ def per_model_table(episodes: pd.DataFrame) -> pd.DataFrame:
     """
     if "variant" not in episodes:
         episodes = episodes.assign(variant=MAIN_VARIANT)
+    if not include_tuning:
+        episodes = episodes[~episodes["variant"].map(is_tuning_variant)]
     missing = [c for c in MODEL_KEYS if c not in episodes]
     if missing:
         raise ValueError(f"episodes lack the columns {missing}")
@@ -296,3 +313,82 @@ def auc_across_seeds(
         "ci_high": hi,
         "n_seeds": int(valid.sum()),
     }
+
+
+# ---------------------------------------------------------------------------------------------
+# Hyperparameter tuning: selection of the configuration (fixed before tuning)
+# ---------------------------------------------------------------------------------------------
+_TIE_TOLERANCE = 1e-9  # criterion values closer than this are tied
+
+
+def tuning_table(val_logs: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """Selection table of the tuning configurations: one row per configuration, in the order of ``val_logs``.
+
+    Columns ``config, criterion, crash_rate, last_env_step, chosen``. ``criterion`` is the mean of
+    ``TUNING_CRITERION_COLUMN`` (``return_balanced``) over the last ``TUNING_CRITERION_LAST_POINTS`` (3) validation
+    points of the run (by ``env_step``) and ``crash_rate`` the mean of ``crash_rate`` over the same points. The chosen
+    configuration has the highest criterion; criterion values within 1e-9 are tied and the lower ``crash_rate`` wins; a
+    remaining tie goes to the configuration listed first (list the defaults first).
+    """
+    if not val_logs:
+        raise ValueError("no tuning configurations given")
+    if len(val_logs) > TUNING_MAX_CONFIGS:
+        raise ValueError(f"at most {TUNING_MAX_CONFIGS} tuning configurations per algorithm, got {len(val_logs)}")
+    rows = []
+    for name, df in val_logs.items():
+        for column in (TUNING_CRITERION_COLUMN, "crash_rate", "env_step"):
+            if column not in df:
+                raise ValueError(f"val_log of {name!r} has no column {column!r}")
+        last = df.sort_values("env_step", kind="stable").tail(TUNING_CRITERION_LAST_POINTS)
+        if len(last) < TUNING_CRITERION_LAST_POINTS:
+            raise ValueError(
+                f"{name!r} has {len(last)} validation points, the criterion needs the last {TUNING_CRITERION_LAST_POINTS}"
+            )
+        if last[[TUNING_CRITERION_COLUMN, "crash_rate"]].isna().any().any():  # pandas would skip NaN silently
+            raise ValueError(f"{name!r}: NaN in {TUNING_CRITERION_COLUMN} or crash_rate over the last validation points")
+        criterion = float(last[TUNING_CRITERION_COLUMN].mean())
+        crash_rate = float(last["crash_rate"].mean())
+        rows.append({"config": str(name), "criterion": criterion, "crash_rate": crash_rate,
+                     "last_env_step": float(last["env_step"].iloc[-1])})
+    table = pd.DataFrame(rows)
+    tied = table[table["criterion"] >= table["criterion"].max() - _TIE_TOLERANCE]
+    table["chosen"] = table.index == tied["crash_rate"].idxmin()  # idxmin: first row among equal crash rates
+    return table
+
+
+def select_tuning_config(val_logs: Mapping[str, pd.DataFrame]) -> str:
+    """Name of the selected tuning configuration (criterion and tie-break: see ``tuning_table``).
+
+    ``val_logs`` maps a configuration name to its ``val_log.csv`` frame (``common.paths.load_tuning_val_logs``).
+    """
+    table = tuning_table(val_logs)
+    return str(table.loc[table["chosen"], "config"].iloc[0])
+
+
+# ---------------------------------------------------------------------------------------------
+# Sensitivity runs: the base point comes from the main grid
+# ---------------------------------------------------------------------------------------------
+def check_sensitivity_base(algo: str, seed: int, variant: str, root: Path = RESULTS_DIR) -> None:
+    """``common.train_config.check_sensitivity_run`` on the ``run_meta.json`` files of the run and of its main-grid base run."""
+    from common.run_meta import read_meta
+
+    sens = read_meta(run_meta_path(algo, SENSITIVITY_REWARD, seed, root, variant))
+    main = read_meta(run_meta_path(algo, SENSITIVITY_REWARD, seed, root, MAIN_VARIANT))
+    check_sensitivity_run(sens, main)
+
+
+def check_sensitivity_runs(root: Path = RESULTS_DIR) -> list[Path]:
+    """Check every sensitivity run under ``<root>/runs`` against its main-grid base run; returns the checked meta files.
+
+    Call before building a sensitivity table. Raises ``ValueError`` (first failing run) or ``FileNotFoundError`` if the
+    main run that provides the base point is missing. Tuning runs and the main variant are not sensitivity runs.
+    """
+    checked = []
+    for algo in ALGORITHMS:
+        for path in sorted((Path(root) / "runs" / algo / SENSITIVITY_REWARD).glob("*/seed*/run_meta.json")):
+            variant = path.parent.parent.name
+            if variant == MAIN_VARIANT or is_tuning_variant(variant):
+                continue
+            check_sensitivity_base(algo, int(path.parent.name.removeprefix("seed")), variant, root)
+            checked.append(path)
+    return checked

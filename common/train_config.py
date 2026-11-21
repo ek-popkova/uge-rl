@@ -2,28 +2,46 @@
 
 ``TrainBudget`` is identical for both algorithms (same number of env steps, same validation and
 checkpoint schedule). ``DDQNConfig`` and ``PPOConfig`` hold every hyperparameter the algorithms
-will need. NO VALUE HERE IS DECIDED: every field marked ``# PLACEHOLDER: decide before training``
-is a conventional starting point that only keeps the code runnable; the team must fix them (and
-list the sensitivity grid) before any training run, see the "TO DECIDE BEFORE TRAINING" list in
-CLAUDE.md. ``placeholders_in_use`` names the fields that still hold an undecided value; the training
-harness prints it and stores it in ``run_meta.json``. When a value is decided, replace ``_ph(...)``
-by a plain default and remove the marker.
+will need. The SHARED decisions are frozen here as plain defaults (gamma, network spec, milestone
+fractions; ``docs/config_decisions.md``, "Shared training decisions") and may only change by team
+agreement. Every field still marked ``# PLACEHOLDER: decide before training`` is a conventional starting
+point that only keeps the code runnable, see the "TO DECIDE BEFORE TRAINING" list in CLAUDE.md.
+``placeholders_in_use`` names the fields that still hold an undecided value; the training harness prints
+it and stores it in ``run_meta.json``. When a value is decided, replace ``_ph(...)`` by a plain default and
+remove the marker.
 
 Hyperparameter sensitivity runs override single fields with ``--set key=value`` (``parse_set_args``,
 ``apply_overrides``); the overridden keys are recorded in ``run_meta.json`` and ``variant_name``
-turns them into the directory level ``runs/<algo>/<reward>/<variant>/seed<s>``.
+turns them into the directory level ``runs/<algo>/<reward>/<variant>/seed<s>``. The sensitivity grid is data
+(``SENSITIVITY_GRID``, relative to the base values) and ``expand_sensitivity_grid`` lists its 24 runs; ``check_sensitivity_run`` verifies that a
+sensitivity run differs from the main-grid run only in its varied parameter. Tuning runs (variant ``tune-<name>``,
+run seed ``PILOT_RUN_SEED``) are checked by ``check_run_roles``.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 import typing
 from dataclasses import dataclass, field, fields
 from typing import Any, Mapping, Optional, Sequence
 
-from common.config import MIN_GAMMA, VAL_SEEDS
-from common.paths import MAIN_VARIANT, check_variant
+from common.config import (
+    MIN_GAMMA,
+    PILOT_RUN_SEED,
+    SENSITIVITY_DENSITY,
+    SENSITIVITY_REWARD,
+    SENSITIVITY_SEEDS,
+    TUNING_DENSITY,
+    TUNING_REWARD,
+    VAL_SEEDS,
+)
+from common.paths import ALGORITHMS, MAIN_VARIANT, check_variant, is_tuning_variant
+
+SUPPORTED_ACTIVATIONS = ("relu", "tanh")  # common.networks builds exactly these
+# Decided for BOTH algorithms; never varied by tuning or sensitivity runs and equal in the two configs.
+SHARED_KEYS = frozenset({"gamma", "hidden_sizes", "activation", "obs_flatten", "ppo_shared_trunk", "device"})
 
 
 def _ph(value: Any) -> Any:
@@ -70,10 +88,14 @@ class TrainBudget(_ConfigBase):
     total_env_steps: int = _ph(100_000)  # PLACEHOLDER: decide before training
     val_every_env_steps: int = _ph(5_000)  # PLACEHOLDER: decide before training
     val_n_episodes: int = _ph(20)  # PLACEHOLDER: decide before training (<= len(VAL_SEEDS))
-    checkpoint_every_env_steps: int = _ph(10_000)  # PLACEHOLDER: decide before training (resume checkpoint)
-    # Fractions of total_env_steps at which a weights-only checkpoint is kept for "early vs late"
-    # behaviour (videos); the final checkpoint at 100% is final.pt.
-    milestone_fractions: tuple[float, ...] = _ph((0.1, 0.5))  # PLACEHOLDER: decide before training
+    # Resume checkpoint interval: an engineering setting that does not affect any result (at most this much work is lost
+    # after a crash). Decided: about 10 min of wall time per checkpoint. Assumption: 12-17 env steps/s per process while
+    # 8-12 runs train in parallel (aggregate 140 steps/s, docs/performance_analysis.md C5; network updates make it a bit
+    # slower), so 10,000 env steps are about 10-14 min. Independent of total_env_steps.
+    checkpoint_every_env_steps: int = 10_000
+    # Fractions of total_env_steps at which a weights-only checkpoint is kept for "early / middle / final"
+    # behaviour (videos); the final checkpoint at 100% is final.pt and is always kept. Decided by the team.
+    milestone_fractions: tuple[float, ...] = (0.1, 0.25, 0.5)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "milestone_fractions", tuple(float(x) for x in self.milestone_fractions))
@@ -107,6 +129,10 @@ def _check_common(cfg: Any) -> None:
     if not hs or any(h <= 0 for h in hs):
         raise ValueError(f"hidden_sizes must be a non-empty tuple of positive ints, got {cfg.hidden_sizes}")
     object.__setattr__(cfg, "hidden_sizes", hs)
+    if cfg.activation not in SUPPORTED_ACTIVATIONS:
+        raise ValueError(f"activation must be one of {SUPPORTED_ACTIVATIONS}, got {cfg.activation!r}")
+    if cfg.obs_flatten is not True:
+        raise ValueError("obs_flatten must be True: both networks are MLPs on the flattened 25-feature observation")
     if cfg.device != "cpu":
         # CLAUDE.md rule 8: the GPU does not help; switch only with a measurement that shows a gain.
         raise ValueError(f"device must be 'cpu' (CLAUDE.md performance rule 8), got {cfg.device!r}")
@@ -117,7 +143,7 @@ class DDQNConfig(_ConfigBase):
     """Double DQN hyperparameters."""
 
     lr: float = _ph(5e-4)  # PLACEHOLDER: decide before training
-    gamma: float = _ph(0.99)  # PLACEHOLDER: decide before training (>= MIN_GAMMA)
+    gamma: float = 0.99  # decided (shared, >= MIN_GAMMA)
     buffer_size: int = _ph(50_000)  # PLACEHOLDER: decide before training
     batch_size: int = _ph(64)  # PLACEHOLDER: decide before training
     learning_starts: int = _ph(1_000)  # PLACEHOLDER: decide before training (env steps before the first update)
@@ -127,15 +153,18 @@ class DDQNConfig(_ConfigBase):
     tau: float = _ph(1.0)  # PLACEHOLDER: decide before training (1.0 = hard copy, < 1 = Polyak averaging)
     eps_start: float = _ph(1.0)  # PLACEHOLDER: decide before training
     eps_end: float = _ph(0.05)  # PLACEHOLDER: decide before training
-    eps_decay_steps: int = _ph(20_000)  # PLACEHOLDER: decide before training (linear decay, env steps)
+    # Linear epsilon decay from eps_start to eps_end over this FRACTION of total_env_steps (so it follows the budget);
+    # resolved to absolute env steps at run start (``eps_decay_steps``) and stored in run_meta.json ("resolved").
+    eps_decay_fraction: float = _ph(0.3)  # PLACEHOLDER: decide before training (in (0, 1])
     max_grad_norm: float = _ph(10.0)  # PLACEHOLDER: decide before training
-    hidden_sizes: tuple[int, ...] = _ph((64, 64))  # PLACEHOLDER: decide before training (same as PPO)
+    hidden_sizes: tuple[int, ...] = (256, 256)  # decided (shared): the Q-network equals the PPO actor
+    activation: str = "relu"  # decided (shared)
+    obs_flatten: bool = True  # decided (shared): 5x5 Kinematics flattened to 25 features, no extra normalization
     device: str = "cpu"  # decided: CLAUDE.md performance rule 8
 
     def __post_init__(self) -> None:
         _check_common(self)
-        for name in ("buffer_size", "batch_size", "train_freq", "gradient_steps", "target_update_interval",
-                     "eps_decay_steps"):
+        for name in ("buffer_size", "batch_size", "train_freq", "gradient_steps", "target_update_interval"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"DDQNConfig.{name} must be positive, got {getattr(self, name)}")
         if self.learning_starts < 0:
@@ -146,6 +175,12 @@ class DDQNConfig(_ConfigBase):
             raise ValueError(f"tau must be in (0, 1], got {self.tau}")
         if not 0.0 <= self.eps_end <= self.eps_start <= 1.0:
             raise ValueError(f"need 0 <= eps_end <= eps_start <= 1, got {self.eps_end}, {self.eps_start}")
+        if not 0.0 < self.eps_decay_fraction <= 1.0:
+            raise ValueError(f"eps_decay_fraction must be in (0, 1], got {self.eps_decay_fraction}")
+
+    def eps_decay_steps(self, total_env_steps: int) -> int:
+        """Env steps of the linear epsilon decay: ``round(eps_decay_fraction * total_env_steps)``, at least 1."""
+        return max(1, round(self.eps_decay_fraction * total_env_steps))
 
 
 @dataclass(frozen=True)
@@ -153,7 +188,7 @@ class PPOConfig(_ConfigBase):
     """PPO hyperparameters. One rollout has ``n_envs * n_steps`` env steps."""
 
     lr: float = _ph(3e-4)  # PLACEHOLDER: decide before training
-    gamma: float = _ph(0.99)  # PLACEHOLDER: decide before training (>= MIN_GAMMA)
+    gamma: float = 0.99  # decided (shared, >= MIN_GAMMA)
     gae_lambda: float = _ph(0.95)  # PLACEHOLDER: decide before training
     clip_range: float = _ph(0.2)  # PLACEHOLDER: decide before training
     n_envs: int = _ph(4)  # PLACEHOLDER: decide before training (vectorized envs, algorithmic)
@@ -164,7 +199,10 @@ class PPOConfig(_ConfigBase):
     vf_coef: float = _ph(0.5)  # PLACEHOLDER: decide before training
     max_grad_norm: float = _ph(0.5)  # PLACEHOLDER: decide before training
     target_kl: Optional[float] = _ph(None)  # PLACEHOLDER: decide before training (None = no early stop)
-    hidden_sizes: tuple[int, ...] = _ph((64, 64))  # PLACEHOLDER: decide before training (same as DDQN)
+    hidden_sizes: tuple[int, ...] = (256, 256)  # decided (shared): size of the actor AND of the critic
+    activation: str = "relu"  # decided (shared)
+    obs_flatten: bool = True  # decided (shared): 5x5 Kinematics flattened to 25 features, no extra normalization
+    ppo_shared_trunk: bool = False  # decided: separate actor and critic networks (the critic is an extra network)
     device: str = "cpu"  # decided: CLAUDE.md performance rule 8
 
     def __post_init__(self) -> None:
@@ -192,12 +230,22 @@ CONFIG_CLASSES = {"ddqn": DDQNConfig, "ppo": PPOConfig}
 
 
 def check_comparable(ddqn_cfg: DDQNConfig, ppo_cfg: PPOConfig) -> None:
-    """Both algorithms must use the same network size (and device); raises ``ValueError`` otherwise."""
+    """Both algorithms must share gamma, network size, activation, observation handling and device.
+
+    Raises ``ValueError`` naming the first field that differs. DDQN Q-network = PPO actor; the PPO critic is an extra
+    network of the same size, so only ``hidden_sizes`` is compared.
+    """
+    if ddqn_cfg.gamma != ppo_cfg.gamma:
+        raise ValueError(f"gamma differs: DDQN {ddqn_cfg.gamma} vs PPO {ppo_cfg.gamma} (the protocol fixes one gamma)")
     if tuple(ddqn_cfg.hidden_sizes) != tuple(ppo_cfg.hidden_sizes):
         raise ValueError(
             f"hidden_sizes differ: DDQN {tuple(ddqn_cfg.hidden_sizes)} vs PPO {tuple(ppo_cfg.hidden_sizes)} "
             "(the protocol requires the same network size for both algorithms)"
         )
+    if ddqn_cfg.activation != ppo_cfg.activation:
+        raise ValueError(f"activation differs: DDQN {ddqn_cfg.activation!r} vs PPO {ppo_cfg.activation!r}")
+    if ddqn_cfg.obs_flatten != ppo_cfg.obs_flatten:
+        raise ValueError(f"obs_flatten differs: DDQN {ddqn_cfg.obs_flatten} vs PPO {ppo_cfg.obs_flatten}")
     if ddqn_cfg.device != ppo_cfg.device:
         raise ValueError(f"device differs: {ddqn_cfg.device!r} vs {ppo_cfg.device!r}")
 
@@ -210,6 +258,18 @@ def placeholders_in_use(*objs: Any, overridden: Sequence[str] = ()) -> list[str]
             if name not in overridden:
                 out.append(f"{type(obj).__name__}.{name}")
     return out
+
+
+def resolve_hyperparameters(cfg: Any, budget: TrainBudget) -> dict[str, Any]:
+    """Absolute values derived from relative hyperparameters at run start; stored as ``resolved`` in run_meta.json.
+
+    DDQN: ``eps_decay_steps`` (from ``eps_decay_fraction`` and ``total_env_steps``). PPO: ``rollout_size``.
+    """
+    if isinstance(cfg, DDQNConfig):
+        return {"eps_decay_steps": cfg.eps_decay_steps(budget.total_env_steps)}
+    if isinstance(cfg, PPOConfig):
+        return {"rollout_size": cfg.rollout_size}
+    return {}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -293,3 +353,165 @@ def variant_name(overrides: Mapping[str, Any]) -> str:
     name = ",".join(f"{k}={_format_value(v)}" for k, v in sorted(overrides.items()))
     check_variant(name)
     return name
+
+
+# ---------------------------------------------------------------------------------------------
+# Tuning and sensitivity protocol (shared decisions, docs/config_decisions.md)
+# ---------------------------------------------------------------------------------------------
+def check_run_roles(
+    variant: str, seed: int, reward: str, density: str, overridden: Sequence[str], budget_overrides: Sequence[str]
+) -> None:
+    """Keep tuning runs apart from every result run; raises ``ValueError`` on a violation.
+
+    A ``tune-<name>`` variant must use the run seed ``PILOT_RUN_SEED``, the reward ``TUNING_REWARD`` and the density
+    ``TUNING_DENSITY``, may override algorithm-specific hyperparameters only (never ``SHARED_KEYS``) and must use the
+    default budget and validation settings (no budget overrides). Conversely ``PILOT_RUN_SEED`` is reserved for tuning.
+    """
+    if not is_tuning_variant(variant):
+        if seed == PILOT_RUN_SEED:
+            raise ValueError(
+                f"run seed {PILOT_RUN_SEED} (PILOT_RUN_SEED) is reserved for tuning runs: use a 'tune-<name>' variant"
+            )
+        return
+    problems = []
+    if seed != PILOT_RUN_SEED:
+        problems.append(f"tuning runs use the run seed {PILOT_RUN_SEED}, got {seed}")
+    if reward != TUNING_REWARD:
+        problems.append(f"tuning runs use the reward {TUNING_REWARD!r}, got {reward!r}")
+    if density != TUNING_DENSITY:
+        problems.append(f"tuning runs use the density {TUNING_DENSITY!r}, got {density!r}")
+    shared = sorted(set(overridden) & SHARED_KEYS)
+    if shared:
+        problems.append(f"tuning may not vary the shared decisions {shared}")
+    if budget_overrides:
+        problems.append(f"tuning may not change the budget or validation settings {sorted(budget_overrides)}")
+    if problems:
+        raise ValueError(f"invalid tuning run {variant!r}: " + "; ".join(problems))
+
+
+# Sensitivity grid, fixed before training: one parameter varied at a time, every grid RELATIVE to the base value, so the
+# base is in the grid by construction and the grid follows whatever base the owner chooses:
+#   "factor"  value x base     lr: x1/3, x1, x3
+#   "offset"  base + value     eps_decay_fraction: base -0.2, base, base +0.2;  clip_range: base -0.1, base, base +0.1
+# The neutral value (factor 1 / offset 0) is the base and is NOT run again: it is the main-grid run (reward "balanced",
+# seeds 0, 1, 2, variant "main"). "bounds" = (low exclusive, high, high inclusive): a resolved value outside is an error
+# (never silently clipped), e.g. an eps_decay_fraction base of 0.2 or 0.9 gives an invalid grid.
+SENSITIVITY_GRID: dict[str, dict[str, dict[str, Any]]] = {
+    "ddqn": {
+        "lr": {"mode": "factor", "values": (1 / 3, 1.0, 3.0), "bounds": (0.0, math.inf, True)},
+        "eps_decay_fraction": {"mode": "offset", "values": (-0.2, 0.0, 0.2), "bounds": (0.0, 1.0, True)},
+    },
+    "ppo": {
+        "lr": {"mode": "factor", "values": (1 / 3, 1.0, 3.0), "bounds": (0.0, math.inf, True)},
+        "clip_range": {"mode": "offset", "values": (-0.1, 0.0, 0.1), "bounds": (0.0, 1.0, False)},
+    },
+}
+_NEUTRAL = {"factor": 1.0, "offset": 0.0}
+
+
+@dataclass(frozen=True)
+class SensitivityRun:
+    """One sensitivity run: ``overrides`` hold the resolved value of the varied parameter."""
+
+    algo: str
+    param: str
+    grid_value: float  # the factor / offset as written in SENSITIVITY_GRID (x1/3, +0.2, -0.1, ...)
+    variant: str
+    overrides: Mapping[str, Any]
+    seed: int
+
+    def cli_args(self) -> list[str]:
+        """Arguments of ``python -m <algo>.train`` that start this run (budget and every other value at its default)."""
+        args = ["--reward", SENSITIVITY_REWARD, "--density", SENSITIVITY_DENSITY, "--seed", str(self.seed)]
+        for key, value in self.overrides.items():
+            args += ["--set", f"{key}={_format_value(value)}"]
+        return args
+
+
+def _resolve_grid_value(algo: str, base: float, param: str, spec: Mapping[str, Any], value: float) -> float:
+    mode = spec["mode"]
+    if mode not in _NEUTRAL:
+        raise ValueError(f"unknown sensitivity mode {mode!r} for {algo}.{param}")
+    raw = value * base if mode == "factor" else base + value
+    resolved = float(f"{raw:.6g}")  # 6 significant digits: the stored value equals the one in the variant name
+    low, high, high_inclusive = spec["bounds"]
+    if not (low < resolved and (resolved <= high if high_inclusive else resolved < high)):
+        raise ValueError(
+            f"{algo}.{param}: base {base} {'x' if mode == 'factor' else '+'} {value:g} = {resolved} is outside the valid "
+            f"range ({low}, {high}{']' if high_inclusive else ')'}; choose another base or change the grid"
+        )
+    return resolved
+
+
+def expand_sensitivity_grid(
+    configs: Optional[Mapping[str, Any]] = None,
+    seeds: Sequence[int] = SENSITIVITY_SEEDS,
+    grid: Mapping[str, Mapping[str, Mapping[str, Any]]] = SENSITIVITY_GRID,
+) -> list[SensitivityRun]:
+    """The sensitivity runs of ``grid``: every non-base grid value x ``seeds``; the base value is skipped.
+
+    Values are resolved against the base config ``configs[algo]`` (default: the algorithm's default config); a resolved
+    value outside its valid range raises ``ValueError``. The absolute values therefore depend on the frozen base values
+    (``eps_decay_fraction`` values are fractions of ``total_env_steps``, resolved to env steps at run start). With the
+    shared grid this is 4 settings x 3 seeds = 12 runs per algorithm, 24 in total.
+    """
+    runs: list[SensitivityRun] = []
+    for algo in ALGORITHMS:
+        cfg = CONFIG_CLASSES[algo]() if configs is None or algo not in configs else configs[algo]
+        for param, spec in grid.get(algo, {}).items():
+            base = getattr(cfg, param)
+            for grid_value in spec["values"]:
+                value = _resolve_grid_value(algo, base, param, spec, grid_value)  # validates every grid point
+                if math.isclose(grid_value, _NEUTRAL[spec["mode"]], abs_tol=1e-12):
+                    continue  # the base point is the main-grid run
+                overrides = {param: value}
+                for seed in seeds:
+                    runs.append(SensitivityRun(algo, param, float(grid_value), variant_name(overrides), overrides, int(seed)))
+    return runs
+
+
+def check_sensitivity_run(sens_meta: Mapping[str, Any], main_meta: Mapping[str, Any]) -> None:
+    """Fail if a sensitivity run differs from its main-grid base run in anything but the one varied parameter.
+
+    Both arguments are ``run_meta.json`` contents (``common.run_meta.read_meta``) of the sensitivity run and of the
+    main-grid run with the same algorithm, reward and seed. The base point of a sensitivity table is that main run
+    (it is not re-run), which is only valid if the hyperparameters that are NOT varied, the budget and the env are
+    identical. Also checks the role of the run: reward ``SENSITIVITY_REWARD``, density ``SENSITIVITY_DENSITY``, a seed of
+    ``SENSITIVITY_SEEDS``, exactly one overridden key and that key is a parameter of ``SENSITIVITY_GRID``.
+    """
+    problems: list[str] = []
+    s_id, m_id = sens_meta["identity"], main_meta["identity"]
+    for key in ("algorithm", "train_reward", "train_density", "seed"):
+        if s_id[key] != m_id[key]:
+            problems.append(f"identity.{key}: sensitivity {s_id[key]!r} vs main {m_id[key]!r}")
+    if m_id["variant"] != MAIN_VARIANT:
+        problems.append(f"the reference run must be the main variant, got {m_id['variant']!r}")
+    if s_id["train_reward"] != SENSITIVITY_REWARD or s_id["train_density"] != SENSITIVITY_DENSITY:
+        problems.append(f"sensitivity runs use reward {SENSITIVITY_REWARD!r} and density {SENSITIVITY_DENSITY!r}")
+    if s_id["seed"] not in SENSITIVITY_SEEDS:
+        problems.append(f"sensitivity seed must be in {SENSITIVITY_SEEDS}, got {s_id['seed']}")
+    varied = list(s_id["overridden_keys"])
+    allowed = SENSITIVITY_GRID.get(s_id["algorithm"], {})
+    if len(varied) != 1:
+        problems.append(f"one parameter at a time: expected exactly one overridden key, got {varied}")
+    elif varied[0] not in allowed:
+        problems.append(f"{varied[0]!r} is not a sensitivity parameter of {s_id['algorithm']}: {sorted(allowed)}")
+    s_hp, m_hp = sens_meta["hyperparameters"], main_meta["hyperparameters"]
+    for key in sorted(set(s_hp) | set(m_hp)):
+        if key in varied:
+            if s_hp.get(key) == m_hp.get(key):
+                problems.append(f"{key}: the varied value equals the main-grid value {m_hp.get(key)} (that is the base point)")
+        elif s_hp.get(key) != m_hp.get(key):
+            problems.append(f"{key}: not varied but differs, sensitivity {s_hp.get(key)} vs main {m_hp.get(key)}")
+    if sens_meta["budget"] != main_meta["budget"]:
+        problems.append(f"budget differs: sensitivity {sens_meta['budget']} vs main {main_meta['budget']}")
+    s_env, m_env = sens_meta.get("env"), main_meta.get("env")
+    if s_env and m_env:  # not yet described when a run is checked before it starts
+        for key in ("env_id", "config", "reward_weights"):
+            if s_env.get(key) != m_env.get(key):
+                problems.append(f"env.{key} differs between the sensitivity run and the main run")
+    if problems:
+        raise ValueError(
+            f"sensitivity run {s_id['variant']!r} (seed {s_id['seed']}) does not match its main-grid base run:\n  - "
+            + "\n  - ".join(problems)
+        )

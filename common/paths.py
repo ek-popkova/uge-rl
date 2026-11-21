@@ -13,7 +13,8 @@
 ``<algo>`` is "ddqn" or "ppo", ``<reward>`` a key of ``common.config.REWARDS``, ``<variant>`` is
 ``"main"`` for the main grid and a name generated from the overridden hyperparameters for sensitivity
 runs (``common.train_config.variant_name``, e.g. ``lr=0.0003`` or ``clip_range=0.1``), so sensitivity
-runs never overwrite main runs. ``<s>`` is the training seed (``TRAIN_SEEDS`` for the main grid),
+runs never overwrite main runs. Hyperparameter tuning runs are the variants ``tune-<name>`` (reward ``balanced``, seed
+``PILOT_RUN_SEED``); ``load_eval_episodes`` skips them by default. ``<s>`` is the training seed (``TRAIN_SEEDS`` for the main grid),
 ``<condition>`` a key of ``common.config.TEST_CONDITIONS``. Before the ``variant`` level existed the
 layout was ``runs/<algo>/<reward>/seed<s>``; no trained run was ever written in it, so it is not
 supported (``load_eval_episodes`` refuses to silently skip such directories).
@@ -30,12 +31,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from common.config import REWARDS, TEST_CONDITIONS
+from common.config import PILOT_RUN_SEED, REWARDS, TEST_CONDITIONS, TUNING_REWARD
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "results"
 ALGORITHMS = ("ddqn", "ppo")
 MAIN_VARIANT = "main"
+TUNING_PREFIX = "tune-"  # variant prefix of the hyperparameter tuning runs (never part of any result table)
 _VARIANT_RE = re.compile(r"^[A-Za-z0-9_+=,-][A-Za-z0-9_.+=,-]*$")  # also valid on Windows
 
 
@@ -44,6 +46,17 @@ def check_variant(variant: str) -> str:
     if not isinstance(variant, str) or not _VARIANT_RE.match(variant) or variant.endswith("."):
         raise ValueError(f"Invalid variant name {variant!r}: use letters, digits and _ . + = , - only")
     return variant
+
+
+def tuning_variant(name: str) -> str:
+    """Variant directory of the tuning configuration ``name``: ``tune-<name>``."""
+    if not name or name.startswith(TUNING_PREFIX):
+        raise ValueError(f"tuning configuration name must be non-empty and without the {TUNING_PREFIX!r} prefix: {name!r}")
+    return check_variant(f"{TUNING_PREFIX}{name}")
+
+
+def is_tuning_variant(variant: str) -> bool:
+    return variant.startswith(TUNING_PREFIX)
 
 
 def _check(algo: str, reward: str, variant: str = MAIN_VARIANT) -> None:
@@ -124,11 +137,13 @@ def save_eval(
     return path
 
 
-def load_eval_episodes(root: Path = RESULTS_DIR) -> pd.DataFrame:
+def load_eval_episodes(root: Path = RESULTS_DIR, include_tuning: bool = False) -> pd.DataFrame:
     """Load all per-episode test CSVs under ``<root>/eval/<algo>/<reward>/<variant>/seed<s>/`` into one frame.
 
     Adds the columns ``algorithm``, ``train_reward`` (the preset the model was trained with),
     ``variant``, ``train_seed`` and ``condition``; ``reward`` stays the preset the evaluation env used.
+    Tuning runs (variant ``tune-<name>``, seed ``PILOT_RUN_SEED``) are skipped unless ``include_tuning`` is True:
+    they never enter a result table.
     """
     frames = []
     for algo in ALGORITHMS:
@@ -138,6 +153,8 @@ def load_eval_episodes(root: Path = RESULTS_DIR) -> pd.DataFrame:
                 f"Old layout without a variant level found: {legacy[0]}; expected .../<reward>/<variant>/seed<s>"
             )
         for path in sorted((Path(root) / "eval" / algo).glob("*/*/seed*/*.csv")):
+            if not include_tuning and is_tuning_variant(path.parent.parent.name):
+                continue
             df = pd.read_csv(path)
             df["algorithm"] = algo
             df["train_reward"] = path.parent.parent.parent.name
@@ -162,3 +179,21 @@ def load_val_logs(
         if path.exists():
             logs[int(seed_dir.name.removeprefix("seed"))] = pd.read_csv(path)
     return dict(sorted(logs.items()))
+
+
+def load_tuning_val_logs(
+    algo: str, root: Path = RESULTS_DIR, seed: int = PILOT_RUN_SEED
+) -> dict[str, pd.DataFrame]:
+    """``val_log.csv`` of every tuning configuration of ``algo``: ``{config name: frame}`` (name without ``tune-``).
+
+    Input of ``common.aggregate.select_tuning_config``. Tuning runs use the reward ``TUNING_REWARD`` and the run seed
+    ``PILOT_RUN_SEED``; configurations are returned in alphabetical order of their name.
+    """
+    if algo not in ALGORITHMS:
+        raise ValueError(f"Unknown algorithm {algo!r}; choose from {ALGORITHMS}")
+    logs = {}
+    for variant_dir in sorted((Path(root) / "runs" / algo / TUNING_REWARD).glob(f"{TUNING_PREFIX}*")):
+        path = variant_dir / f"seed{seed}" / "val_log.csv"
+        if path.exists():
+            logs[variant_dir.name.removeprefix(TUNING_PREFIX)] = pd.read_csv(path)
+    return logs

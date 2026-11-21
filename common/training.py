@@ -54,7 +54,17 @@ import torch  # noqa: E402
 
 from common.agent_base import Agent  # noqa: E402
 from common.benchmark import measure_env_speed, measure_inference, record_val_observations  # noqa: E402
-from common.config import BASE_CONFIG, DENSITIES, ENV_ID, REWARDS, TRAIN_DENSITY, TRAIN_SEEDS  # noqa: E402
+from common.config import (  # noqa: E402
+    BASE_CONFIG,
+    DENSITIES,
+    ENV_ID,
+    REWARDS,
+    SENSITIVITY_DENSITY,
+    SENSITIVITY_REWARD,
+    SENSITIVITY_SEEDS,
+    TRAIN_DENSITY,
+    TRAIN_SEEDS,
+)
 from common.evaluate import validate  # noqa: E402
 from common.paths import (  # noqa: E402
     MAIN_VARIANT,
@@ -70,10 +80,14 @@ from common.run_meta import describe_env, new_meta, read_meta, reproducibility_i
 from common.seeding import derived_env_seeds, set_global_seeds  # noqa: E402
 from common.train_config import (  # noqa: E402
     CONFIG_CLASSES,
+    SENSITIVITY_GRID,
     TrainBudget,
     apply_overrides,
+    check_run_roles,
+    check_sensitivity_run,
     parse_set_args,
     placeholders_in_use,
+    resolve_hyperparameters,
     variant_name,
 )
 from common.train_env import finished_episodes, make_train_env, make_vector_env  # noqa: E402
@@ -277,6 +291,8 @@ def resolve_setup(algo: str, argv: Optional[Sequence[str]] = None) -> RunSetup:
         )
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
+    # tuning runs (tune-<name>) and the reserved run seed 99 stay apart from every result run
+    check_run_roles(variant, args.seed, args.reward, args.density, sorted(overrides), sorted(budget_kw))
     return RunSetup(
         algo=algo, reward=args.reward, density=args.density, seed=args.seed, variant=variant, cfg=cfg, budget=budget,
         overridden_keys=sorted(overrides), budget_overrides=sorted(budget_kw), workers=args.workers,
@@ -384,6 +400,7 @@ class TrainingRun:
         meta["hyperparameters"] = s.cfg.to_dict()
         meta["budget"] = s.budget.to_dict()
         meta["budget_overrides"] = s.budget_overrides
+        meta["resolved"] = resolve_hyperparameters(s.cfg, s.budget)
         meta["placeholders_in_use"] = placeholders_in_use(
             s.cfg, s.budget, overridden=[*s.overridden_keys, *s.budget_overrides]
         )
@@ -393,6 +410,7 @@ class TrainingRun:
             print("WARNING: undecided PLACEHOLDER values in use: " + ", ".join(meta["placeholders_in_use"]),
                   file=sys.stderr, flush=True)
 
+        self._check_against_main_run(meta)  # sensitivity runs must differ from the main run only in the varied key
         self._benchmark_and_estimate(meta, resuming)  # may exit; nothing is written to disk before this point
         timers = Timers()
         logger: Optional[TrainLogger] = None
@@ -439,6 +457,18 @@ class TrainingRun:
                 f"{rdir} already holds results. Use --resume to continue from resume.pt, or --overwrite to start over."
             )
         return False
+
+    def _check_against_main_run(self, meta: dict) -> None:
+        """Sensitivity run (one grid parameter overridden, reward / seed of the sensitivity protocol) whose main-grid
+        base run already exists: fail before training if anything but the varied parameter differs. Without a main run
+        yet the check is repeated when the sensitivity table is built (``common.aggregate.check_sensitivity_runs``)."""
+        s = self.setup
+        in_role = (s.variant != MAIN_VARIANT and s.reward == SENSITIVITY_REWARD and s.density == SENSITIVITY_DENSITY
+                   and s.seed in SENSITIVITY_SEEDS and len(s.overridden_keys) == 1
+                   and s.overridden_keys[0] in SENSITIVITY_GRID.get(s.algo, {}))
+        main_path = run_meta_path(s.algo, s.reward, s.seed, s.root, MAIN_VARIANT)
+        if in_role and main_path.exists():
+            check_sensitivity_run(meta, read_meta(main_path))
 
     def _benchmark_and_estimate(self, meta: dict, resuming: bool) -> None:
         """Quiet speed benchmark (before any env of this run exists), then the runtime estimate (rule 1)."""

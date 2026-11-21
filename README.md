@@ -61,8 +61,9 @@ The shared settings live in `common/config.py` and were chosen from the environm
   | `safety` | 0.2 | 0.1 | 30 | 0.5 |
 
   Train with gamma >= 0.99. Print the weights and analytic indifference points with `python -m common.config`.
-- **Seeds:** training `[0..4]`, sensitivity `[0, 1, 2]`, validation `20000..20019`, test `10000..10099`, all disjoint from
-  each other and from the pilot seeds 1000..1049.
+- **Seeds:** training `[0..4]`, sensitivity `[0, 1, 2]` (reuse training seeds 0..2: the base point is the main-grid run),
+  tuning run seed `PILOT_RUN_SEED = 99`, validation `20000..20019`, test `10000..10099`, all disjoint from each other and from
+  the pilot seeds 1000..1049.
 - **Test conditions** (evaluation only): `main`, `low`, `high`, `long` (60 s), `precise` (`highway-v0`, 15 Hz); see
   `docs/evaluation_protocol.md`.
 
@@ -70,11 +71,11 @@ The shared settings live in `common/config.py` and were chosen from the environm
 
 ```bash
 pip install -r requirements.txt   # includes pytest
-python -m pytest -m "not slow"    # fast tier: 51 tests in 3.6 s (pure functions and fake envs; use during development)
-python -m pytest                  # full suite: 110 tests in 255 s (4 min 15 s; 198 s in an earlier quiet run, wall time varies 2-5x here, C8)
+python -m pytest -m "not slow"    # fast tier: 83 tests in 4-8 s (pure functions and fake envs; use during development)
+python -m pytest                  # full suite: 143 tests in 227 s (3 min 47 s; 146 s in an earlier quiet run, wall time varies 2-5x here, C8)
 ```
 
-The 59 `slow` tests create a real highway-env environment or run episodes (evaluation determinism, spawned workers, the
+The 60 `slow` tests create a real highway-env environment or run episodes (evaluation determinism, spawned workers, the
 training harness end to end with the `RandomTrainer`, the scripted baselines against `TARGET_PERFORMANCE`). Durations were
 measured on this machine with nothing else running; do not run the tests while training or timing benchmarks are running
 (they load the CPU and distort the measured steps/s). When to run which tier: `CLAUDE.md`, "Tests: why they exist and when
@@ -136,9 +137,18 @@ python -m ddqn.train --reward balanced --seed 0 --resume                   # con
 | `--benchmark-steps`, `--max-minutes`, `--force` | quiet speed benchmark before the run (0 = skip), refuse to start above the estimate unless `--force` |
 
 Before the first step the harness measures the simulator speed in a quiet process and prints the runtime estimate
-(simulation only; network updates are not included). Hyperparameters and the budget are **placeholders** until the team
-decides them (`common/train_config.py`; list in `CLAUDE.md`, "TO DECIDE BEFORE TRAINING"); the run warns about every
-placeholder it uses.
+(simulation only; network updates are not included). The shared decisions are frozen (gamma 0.99; MLP 256x256 ReLU on the 25
+flattened observation features, built by `common/networks.py`; tuning and sensitivity protocol; milestones 10 / 25 / 50%:
+`docs/config_decisions.md`, "Shared training decisions"). `total_env_steps`, the validation settings, `TARGET_PERFORMANCE["strong"]`, `TARGET_CONSECUTIVE` and the algorithm-specific hyperparameters are still
+**placeholders** until decided (`common/train_config.py`; list in `CLAUDE.md`, "TO DECIDE BEFORE TRAINING"); the run warns
+about every placeholder it uses.
+
+Tuning and sensitivity runs (rules in `docs/config_decisions.md`; log in `docs/tuning_log.md`):
+
+```bash
+python -m ddqn.train --reward balanced --seed 99 --variant tune-lr-high --set lr=0.001   # tuning run, seed 99, at most 4 per algorithm
+python -c "from common.train_config import expand_sensitivity_grid as g; [print(r.algo, r.variant, r.seed) for r in g()]"   # the 24 sensitivity runs
+```
 
 Files written per run (schemas in `common/train_logging.py`, described in `docs/evaluation_protocol.md` section 11):
 

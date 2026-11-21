@@ -12,9 +12,11 @@ that the text can be copied into the report. Code: `common/evaluate.py`, `common
   (`TRAIN_SEEDS = [0, 1, 2, 3, 4]`) = 40 models. Hyperparameter sensitivity runs use three seeds
   (`SENSITIVITY_SEEDS = [0, 1, 2]`) and are reported separately.
 - All models train on the same environment: `highway-fast-v0`, medium density (`TRAIN_DENSITY`), `BASE_CONFIG`.
-- Same number of environment steps and the same network size for both algorithms; discount factor gamma >= 0.99
-  (`MIN_GAMMA`), because with a smaller gamma a late crash is discounted so much that the lighter rewards can rank a
-  crash above slow safe driving (`docs/config_decisions.md`).
+- Same number of environment steps and the same network for both algorithms: MLP `hidden_sizes = (256, 256)` with ReLU on
+  the 5 x 5 Kinematics observation flattened to 25 features (DDQN Q-network = PPO actor; the PPO critic is an extra
+  network of the same size; `common/networks.py`). Discount factor gamma = 0.99 for both (`MIN_GAMMA = 0.99`): a late crash
+  still matters (0.99^29 is about 0.75), whereas with a smaller gamma the lighter rewards can rank a crash above slow safe
+  driving (`docs/config_decisions.md`, "Shared training decisions").
 - **Final checkpoint only.** The model evaluated is the one at the end of the step budget. If a checkpoint is ever
   selected (for example the best validation return), the selection uses `VAL_SEEDS`, never `TEST_SEEDS`.
 - **Time limit is not termination.** An episode that ends because the 30 s (or 60 s) limit is reached is `truncated`, not
@@ -29,16 +31,17 @@ that the text can be copied into the report. Code: `common/evaluate.py`, `common
 |---|---|---|
 | `PILOT_SEEDS` | 1000..1049 | environment pilot with scripted policies (done) |
 | `TRAIN_SEEDS` | 0..4 | run seeds of the main grid |
-| `SENSITIVITY_SEEDS` | 0, 1, 2 | run seeds of the sensitivity runs |
+| `SENSITIVITY_SEEDS` | 0, 1, 2 | run seeds of the sensitivity runs (reuse training seeds 0..2: the base point is the main-grid run) |
+| `PILOT_RUN_SEED` | 99 | run seed of the hyperparameter tuning runs (`tune-<name>` variants), never a result seed |
 | `VAL_SEEDS` | 20000..20019 | episode seeds of the periodic evaluation during training (learning curves) |
 | `TEST_SEEDS` | 10000..10099 | episode seeds of the final evaluation, used once |
 
-Pilot, train, validation and test sets are pairwise disjoint (asserted in `common/config.py`, tested in
+Pilot, train, validation and test sets and `PILOT_RUN_SEED` are pairwise disjoint (asserted in `common/config.py`, tested in
 `tests/test_config.py`). Seeding rules for training runs are in `common/seeding.py`: global seeds from the run seed,
 `env.reset(seed=s)` once and unseeded resets afterwards, exploration from `np.random.default_rng(s)`, vectorized env `i`
 gets seed `100000 + s * 1000 + i` (`derived_env_seeds(s, n_envs)`, at most 1000 envs per run). The offset keeps derived
 seeds disjoint from the pilot, validation and test seeds for every run seed (tested for all `TRAIN_SEEDS` and
-`SENSITIVITY_SEEDS` with up to 64 envs).
+`SENSITIVITY_SEEDS` with up to 64 envs, and for `PILOT_RUN_SEED` with all 1000 env indices against every other run seed).
 
 ## 3. Test conditions
 
@@ -170,7 +173,9 @@ steps) and the actual `env_step` is stored; a last validation always happens at 
   on `main`, so a crash bound alone would reward an agent that only learns to brake; `idle` crashes in 71% of the
   episodes at 24.7 m/s on `main` (VAL_SEEDS: 0.60 and 24.8 m/s). `tests/test_training.py::test_no_scripted_baseline_meets_target_performance`
   runs the four baselines through `validate()` on `VAL_SEEDS` and fails if one meets either level, which guards the values
-  against later edits. All values and `TARGET_CONSECUTIVE` are placeholders until the team decides them.
+  against later edits. `beats_idle` is derived from the idle baseline (crash rate 0.6 exactly and mean speed 24.7564 m/s on
+  `VAL_SEEDS`, the latter rounded up to 24.8) and needs no team decision; `strong` and `TARGET_CONSECUTIVE` are placeholders until
+  the team decides them after the pilot runs.
 
 ## 8. Baselines
 
@@ -237,7 +242,9 @@ results/eval/baselines/<condition>.csv, summary.csv                  scripted ba
 `<variant>` is `main` for the 40 main-grid models. A sensitivity run is a variant named from its overrides by
 `common.train_config.variant_name` (keys sorted, e.g. `clip_range=0.1`, `gamma=0.995,lr=0.0003`, `hidden_sizes=32x32`),
 so it can never overwrite a main run. The layout without the variant level was never used for a trained run and is not
-supported (`load_eval_episodes` raises if it finds one). Helpers in `common/paths.py`. `results/` is git-ignored.
+supported (`load_eval_episodes` raises if it finds one). Hyperparameter tuning runs are the variants `tune-<name>` (reward
+`balanced`, run seed `PILOT_RUN_SEED = 99`); `load_eval_episodes` and `per_model_table` exclude them by default, so they never
+reach a result table. Helpers in `common/paths.py`. `results/` is git-ignored.
 
 ## 10. Fixed before training, not to be changed after seeing results
 
@@ -246,8 +253,35 @@ episodes; the metric definitions including the near-miss threshold of 1.5 s and 
 `TARGET_PERFORMANCE` (both levels) and `TARGET_CONSECUTIVE`; deterministic evaluation of the final checkpoint; the aggregation (seed as unit, 95% Student-t
 interval over seeds); gamma >= 0.99; the same step budget (`TrainBudget`: total steps, validation interval and number of
 validation episodes) and network size for both algorithms; the treatment of time-limit truncation. Any deviation is reported
-as such. The budget, the hyperparameters and `TARGET_PERFORMANCE` are still placeholders at the time of writing (list in
-`CLAUDE.md`, "TO DECIDE BEFORE TRAINING") and must be decided before the first training run.
+as such. The shared open items at the time of writing are `total_env_steps`, `val_every_env_steps`, `val_n_episodes`,
+`TARGET_PERFORMANCE["strong"]` and `TARGET_CONSECUTIVE`; the algorithm-specific hyperparameters are still placeholders too
+(list in `CLAUDE.md`, "TO DECIDE BEFORE TRAINING"). All must be decided before the first training run.
+
+Shared training decisions, agreed by the team (`docs/config_decisions.md`, "Shared training decisions"); they may only change by
+team agreement, and a change after the main grid has started is reported as a deviation:
+
+- gamma = 0.99 for both algorithms; network: MLP `hidden_sizes = (256, 256)`, ReLU, input = the 5 x 5 Kinematics observation
+  flattened to 25 features without extra normalization, built by `common.networks.build_mlp` for both; DDQN Q-network = PPO
+  actor, the PPO critic is an extra network of the same size, separate from the actor (`ppo_shared_trunk = False`); weight
+  initialization is algorithm-specific. `check_comparable` checks gamma, `hidden_sizes` and `activation`.
+- **Tuning budget:** at most 4 configurations per algorithm (the defaults + up to 3 variations), only algorithm-specific
+  hyperparameters varied (never the shared values, the budget or the validation settings); one run per configuration with
+  `PILOT_RUN_SEED = 99`, reward `balanced`, density `medium`, validation on `VAL_SEEDS` only, variant `tune-<name>`.
+  **Selection criterion:** mean `return_balanced` over the last 3 validation points, ties broken by the lower `crash_rate`
+  (`common.aggregate.select_tuning_config`). Log: `docs/tuning_log.md`. Tuning never touches `TEST_SEEDS`.
+- **Sensitivity framework:** reward `balanced`, density `medium`, the main grid's `total_env_steps`, `SENSITIVITY_SEEDS`,
+  one parameter at a time with the others at their frozen base values. Grid (`SENSITIVITY_GRID`), every value relative to the
+  base: learning rate base x1/3, x1, x3 (both algorithms); DDQN `eps_decay_fraction` (the fraction of `total_env_steps` over
+  which epsilon decays) base -0.2, base, base +0.2; PPO `clip_range` base -0.1, base, base +0.1; `gamma` is not varied. A
+  resolved value outside (0, 1] (`eps_decay_fraction`) or (0, 1) (`clip_range`) raises, it is never clipped. The base value
+  is in the grid by construction and is not re-run: its point in a sensitivity table is the main-grid
+  run (reward `balanced`, seeds 0, 1, 2, variant `main`), so 4 settings x 3 seeds = 12 runs per algorithm, 24 in total
+  (`expand_sensitivity_grid`). `check_sensitivity_run` / `check_sensitivity_runs` fail if a sensitivity run differs from the
+  main run in anything but its varied parameter. Relative values are resolved from the base config at expansion time; the
+  absolute values are in the run's `run_meta.json` (`hyperparameters`, plus `resolved.eps_decay_steps` for the DDQN epsilon
+  schedule). The 24 runs for the current placeholder bases are listed in `docs/config_decisions.md`.
+- **Video milestones** `milestone_fractions = (0.1, 0.25, 0.5)` plus the always-kept final checkpoint, and the video episode
+  rule in section 11.
 
 ## 11. Training logs, computational cost, variants and videos
 
@@ -299,6 +333,25 @@ chooses between an in-process and a subprocess vector env (PPO) and the validati
 --n 3` renders them (`env.reset(seed=seed)` reproduces the measured episode). The qualitative analysis shows crash seeds of
 the final checkpoint and of an early milestone checkpoint (`milestone_<p>pct.pt`, `TrainBudget.milestone_fractions`) of the
 same run. `scripts/record_video.py` is the only script that renders.
+
+**Video episodes (fixed rule).** Checkpoints: the milestones 10% / 25% / 50% (`TrainBudget.milestone_fractions`) and the final
+checkpoint, which is always kept. Episodes: for every (reward, training seed) the rule gives candidate `TEST_SEEDS` episodes
+that are the same for both algorithms and for every checkpoint of both runs, so the algorithms (and early / middle / final
+behaviour) are compared on identical traffic. They are computed from the `main` test results of the two FINAL models (same
+reward and training seed) by `common.failure_cases.video_episode_seeds`, always the lowest seed number of the category
+(deterministic, not picked by looking at a video):
+
+| Category | Definition |
+|---|---|
+| `both_crashed` | both models crashed on the seed |
+| `both_completed` | both models reached the time limit |
+| `ddqn_crashed_only` (disagreement) | DDQN crashed, PPO did not: the same starting situation, opposite outcomes |
+| `ppo_crashed_only` (disagreement) | PPO crashed, DDQN did not |
+
+A category is empty (`None`) when no seed qualifies; the report then says so and, for `both_*`, shows each final model's first
+seed of `list_episodes_by_outcome` instead. **The rule yields candidates for every (reward, training seed), but the report
+video uses only training seed 0 of each reward, on the `main` condition, plus the early and middle milestone checkpoints of
+the same models.** That keeps the video short; the other candidates stay available.
 
 ## References
 

@@ -14,6 +14,7 @@ from common.config import (
     ENV_ID,
     EVAL_SEEDS,
     MIN_GAMMA,
+    PILOT_RUN_SEED,
     PILOT_SEEDS,
     REWARDS,
     SENSITIVITY_SEEDS,
@@ -75,10 +76,11 @@ def test_make_env_defaults_and_no_rendering():
 
 
 def test_seed_sets_are_disjoint():
-    sets = {"pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "val": VAL_SEEDS, "test": TEST_SEEDS}
+    sets = {"pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "val": VAL_SEEDS, "test": TEST_SEEDS,
+            "pilot_run": [PILOT_RUN_SEED]}
     for (a, sa), (b, sb) in itertools.combinations(sets.items(), 2):
         assert not set(sa) & set(sb), f"{a} and {b} overlap"
-    assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS))
+    assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS) | {PILOT_RUN_SEED})
 
 
 def test_seed_set_values():

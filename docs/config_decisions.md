@@ -85,8 +85,10 @@ Custom rewards are computed by `common.rewards.CustomRewardWrapper` from the rew
 | `VAL_SEEDS` | `range(20000, 20020)` (20 episodes) | n/a | chosen | Periodic evaluation during training (learning curves); never used for the final result. |
 | `TEST_SEEDS` (alias `EVAL_SEEDS`) | `range(10000, 10100)` (100 episodes) | n/a (earlier placeholder `range(100, 120)`) | chosen | 100 episodes bring the standard error of a crash rate near 50% to about 5 points (7 points with the pilot's n = 50); used once for the final evaluation. |
 | `PILOT_SEEDS` | `range(1000, 1050)` | n/a | chosen | Kept only to assert disjointness. |
+| `PILOT_RUN_SEED` | 99 | n/a | chosen | Run seed of the hyperparameter tuning runs (see "Shared training decisions"); not a result seed. |
 
-Pilot, train, validation and test seed sets are pairwise disjoint (asserted in `common/config.py`, tested in `tests/test_config.py`).
+Pilot, train, validation, test seed sets and `PILOT_RUN_SEED` are pairwise disjoint (asserted in `common/config.py`, tested in
+`tests/test_config.py`); the sensitivity seeds reuse training seeds 0..2 on purpose (their base point is the main-grid run).
 
 ## TEST_CONDITIONS
 
@@ -95,24 +97,70 @@ preset: `main` (training condition), `low` / `high` (other densities), `long` (6
 to 30 s in the pilot), `precise` (`highway-v0`, `simulation_frequency=15`, collisions between other vehicles checked). Rationale
 and metrics: `docs/evaluation_protocol.md`.
 
-## TARGET_PERFORMANCE and TARGET_CONSECUTIVE (placeholders)
+## TARGET_PERFORMANCE and TARGET_CONSECUTIVE
 
 Used by `common.aggregate.steps_to_threshold` for "env steps to target performance" in the cost comparison. Behavioural
 metrics only, so the levels are comparable across reward presets. Two **pre-registered, named levels**, both reported for
 every run, fixed before any training run and not changed after seeing results (`docs/evaluation_protocol.md` sections 7
-and 10); all values below are **placeholders, decide before training**.
+and 10). `beats_idle` is decided (derived from the idle baseline, no team decision needed); `strong` and `TARGET_CONSECUTIVE` are
+**placeholders, decided after the pilot runs**.
 
 | Parameter | Value | Meaning |
 |---|---|---|
-| `TARGET_PERFORMANCE["beats_idle"]` | `crash_rate < 0.6` and `mean_speed > 24.8` | strictly better than `idle` on both metrics on `VAL_SEEDS` (idle: 0.60 and 24.76 m/s): the agent has learned something over the default policy |
-| `TARGET_PERFORMANCE["strong"]` | `crash_rate <= 0.2` and `mean_speed >= 25.5` | driving fast and safely; may turn out unreachable, in which case `beats_idle` still allows a comparison |
-| `TARGET_CONSECUTIVE` | 2 | a level is reached at the first of this many consecutive validation points at which all its conditions hold (20 validation episodes: crash rate moves in steps of 0.05, one lucky point must not count) |
+| `TARGET_PERFORMANCE["beats_idle"]` (decided) | `crash_rate < 0.6` and `mean_speed > 24.8` | strictly better than `idle` on both metrics on `VAL_SEEDS`: the agent has learned something over the default policy. Source: `idle` through `validate` on all 20 `VAL_SEEDS` gives crash rate 0.6 exactly and mean speed 24.7564 m/s; 24.8 is that speed rounded up to 0.1 m/s (slightly stricter than "faster than idle"). Re-derive only if `VAL_SEEDS` or the env change |
+| `TARGET_PERFORMANCE["strong"]` (placeholder) | `crash_rate <= 0.2` and `mean_speed >= 25.5` | driving fast and safely; may turn out unreachable, in which case `beats_idle` still allows a comparison |
+| `TARGET_CONSECUTIVE` (placeholder) | 2 | a level is reached at the first of this many consecutive validation points at which all its conditions hold (20 validation episodes: crash rate moves in steps of 0.05, one lucky point must not count) |
 
 Each level is joint and must stay unreachable for the scripted baselines: `slower` has a 0% crash rate at 20 m/s, so a
 crash bound alone would reward braking; `idle` crashes in 71% of the episodes at 24.7 m/s (`docs/evaluation_protocol.md`
-section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.2, idle 0.60 / 24.8, slower 0.00 / 20.0,
-faster 1.00 / 28.9 m/s; `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` checks both levels. The
-budget and the hyperparameters (`common/train_config.py`) are placeholders too.
+section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.24, idle 0.60 / 24.76, slower 0.00 / 20.03,
+faster 1.00 / 28.90 m/s; `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` checks both levels. The
+open budget items (`total_env_steps`, validation interval and episodes) and the algorithm-specific hyperparameters (`common/train_config.py`) are placeholders too.
+
+## Shared training decisions
+
+Agreed by the team and identical for DDQN and PPO; code: `common/train_config.py`, `common/networks.py`, `common/config.py`
+(tuning and sensitivity constants), `common/aggregate.py`. **These may only change by team agreement. A change after the main
+grid has started is reported as a deviation** (`docs/evaluation_protocol.md` section 10). Everything not listed here is still
+a placeholder (`CLAUDE.md`, "TO DECIDE BEFORE TRAINING"). The only shared open items are `total_env_steps`,
+`val_every_env_steps`, `val_n_episodes`, `TARGET_PERFORMANCE["strong"]` and `TARGET_CONSECUTIVE`; everything else that is still a
+placeholder is an algorithm-specific hyperparameter and stays with its owner.
+
+| Decision | Value | Justification |
+|---|---|---|
+| discount factor `gamma` | 0.99 for both | 0.99^29 is about 0.75 at the end of a 30-step episode, so a late crash still matters (and `MIN_GAMMA = 0.99` rules out the smaller values that rank a crash above slow safe driving) |
+| network input | the 5 x 5 Kinematics observation flattened to 25 features, no extra normalization (`obs_flatten = True`) | the env already normalizes; one flattening (`common.networks.flatten_obs`) for both algorithms |
+| network | MLP, `hidden_sizes = (256, 256)`, ReLU (`activation = "relu"`), built by `common.networks.build_mlp` | 25 inputs and a small MLP: the cost is negligible next to the simulator (13-55 steps/s); [256, 256] as in the HighwayEnv examples. Weight initialization is left to each algorithm (algorithm-specific) |
+| same network size | DDQN Q-network = PPO actor (25 -> 256 -> 256 -> 5, 73,733 parameters); the PPO critic (25 -> 256 -> 256 -> 1, 72,705) is an extra network of the same size that belongs to the algorithm | the compared policy / value function has the same capacity; `check_comparable` checks gamma, `hidden_sizes`, `activation` (and `obs_flatten`, `device`) |
+| separate actor and critic (`ppo_shared_trunk = False`) | PPO only | the critic loss does not interfere with the policy features |
+| tuning budget | at most 4 configurations per algorithm (the defaults + up to 3 variations), only algorithm-specific hyperparameters varied (never the shared values above, the budget or the validation settings); one run per configuration with the pilot run seed `PILOT_RUN_SEED = 99`, reward `balanced`, density `medium`, validation on `VAL_SEEDS` only | equal for both algorithms, so the comparison is not "who tuned more"; seed 99 is disjoint from every seed set and its derived vector-env seeds collide with none (tested) |
+| selection criterion | mean `return_balanced` over the last 3 validation points; ties (within 1e-9) broken by the lower `crash_rate` over the same points, then the first listed (the defaults); `common.aggregate.select_tuning_config` | fixed before any tuning; a mean over 3 points damps the noise of a single 20-episode validation |
+| tuning runs | variant `tune-<name>` (`runs/<algo>/balanced/tune-<name>/seed99/`); `load_eval_episodes` and `per_model_table` exclude them by default; the harness refuses a `tune-*` run with another seed / reward / density, a shared key or a budget override, and refuses seed 99 outside `tune-*` | they never mix with the main grid or the sensitivity runs. Log: `docs/tuning_log.md` |
+| sensitivity framework | reward `balanced`, density `medium`, the same `total_env_steps` as the main grid, `SENSITIVITY_SEEDS = [0, 1, 2]`, one parameter varied at a time, the others at their frozen base values | one-at-a-time around frozen values is the cheapest design that shows which hyperparameter matters |
+| sensitivity grid (`SENSITIVITY_GRID`), **relative to the base value** | learning rate: base x1/3, x1, x3 (both algorithms); DDQN `eps_decay_fraction`: base -0.2, base, base +0.2; PPO `clip_range`: base -0.1, base, base +0.1. `gamma` is not varied (>= 0.99 is required, little effect on 30-step episodes) | the base is in the grid by construction, so the grid follows whatever base the owner chooses and whatever `total_env_steps` the team decides. A value outside its valid range (`eps_decay_fraction` in (0, 1], `clip_range` in (0, 1)) raises instead of being clipped: the `eps_decay_fraction` base must lie in (0.2, 0.8], the `clip_range` base in (0.1, 0.9). 4 non-base settings x 3 seeds = 12 runs per algorithm, 24 in total (`expand_sensitivity_grid`) |
+| DDQN epsilon decay | `eps_decay_fraction` (placeholder base 0.3) of `total_env_steps`, linear from `eps_start` to `eps_end` | a fraction instead of absolute steps, so the schedule and its sensitivity grid follow the budget. Resolved to `eps_decay_steps = round(fraction x total_env_steps)` at run start (`DDQNConfig.eps_decay_steps`) and stored in `run_meta.json` under `resolved` (PPO: `rollout_size`) |
+| sensitivity base point | NOT re-run: it is the main-grid run with reward `balanced`, seeds 0, 1, 2, variant `main` | saves 6 runs per algorithm. Only valid if the non-varied hyperparameters, the budget and the env are identical, so `check_sensitivity_run` (run at the start of a sensitivity run when the main run exists, and by `check_sensitivity_runs` before a table is built) fails otherwise |
+| video milestones | `milestone_fractions = (0.1, 0.25, 0.5)`; the final checkpoint `final.pt` is always kept | early / middle / final behaviour of the same run |
+| video episodes | candidate `TEST_SEEDS` episodes shared by both algorithms, from the final models' `main` test results (`common.failure_cases.video_episode_seeds`): both crashed, both completed and the two disagreement cases (only DDQN / only PPO crashed); the report video uses training seed 0 of each reward only (rule in `docs/evaluation_protocol.md` section 11) | identical starting situations make the two algorithms (and early / middle / final checkpoints) directly comparable; one training seed keeps the video short |
+| engineering settings (no effect on results) | `checkpoint_every_env_steps = 10,000`; `update_log_every` K = 100 for DDQN, 1 for PPO | checkpoint: about 10 min of wall time at the measured speed, assuming 12-17 env steps/s per process with 8-12 runs in parallel (aggregate 140 steps/s, PA C5), network updates make it a bit slower; at most this much work is lost after a crash. K only sets the size of `update_log.csv` |
+
+### Sensitivity runs for the current placeholder bases
+
+The absolute values depend on the frozen base values and on `total_env_steps` (here the placeholders: DDQN lr 5e-4,
+`eps_decay_fraction` 0.3, PPO lr 3e-4, `clip_range` 0.2, `total_env_steps` 100,000); `expand_sensitivity_grid()` recomputes them. Every
+setting runs with seeds 0, 1, 2 (reward `balanced`, density `medium`), 3 runs per setting; the base setting is the main-grid run.
+
+| Algorithm | Parameter | Grid | Resolved value | Variant directory | Runs |
+|---|---|---|---|---|---:|
+| DDQN | `lr` | base x1/3 | 0.000166667 | `lr=0.000166667` | 3 |
+| DDQN | `lr` | base x3 | 0.0015 | `lr=0.0015` | 3 |
+| DDQN | `eps_decay_fraction` | base -0.2 | 0.1 (10,000 steps) | `eps_decay_fraction=0.1` | 3 |
+| DDQN | `eps_decay_fraction` | base +0.2 | 0.5 (50,000 steps) | `eps_decay_fraction=0.5` | 3 |
+| PPO | `lr` | base x1/3 | 0.0001 | `lr=0.0001` | 3 |
+| PPO | `lr` | base x3 | 0.0009 | `lr=0.0009` | 3 |
+| PPO | `clip_range` | base -0.1 | 0.1 | `clip_range=0.1` | 3 |
+| PPO | `clip_range` | base +0.1 | 0.3 | `clip_range=0.3` | 3 |
+| | | | | **total** | **24** |
 
 ## Limitations
 

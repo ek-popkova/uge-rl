@@ -7,6 +7,8 @@ harness wraps the run in try/finally. Sections:
     status, error
     identity          algorithm, train_reward, train_density, seed, variant, overridden_keys
     hyperparameters   full DDQNConfig / PPOConfig;  budget  full TrainBudget (+ budget_overrides)
+    resolved          absolute values derived from relative hyperparameters at run start (DDQN eps_decay_steps from
+                      eps_decay_fraction x total_env_steps; PPO rollout_size)
     placeholders_in_use   undecided config values this run used (common.train_config)
     env               env id, the resolved env config actually used (env.unwrapped.config), reward weights,
                       action index mapping, observation shape, NEAR_MISS_TTC, REVERSAL_WINDOW
@@ -166,6 +168,7 @@ def new_meta(identity: dict[str, Any]) -> dict[str, Any]:
         "hyperparameters": None,
         "budget": None,
         "budget_overrides": [],
+        "resolved": {},
         "placeholders_in_use": [],
         "env": None,
         "reproducibility": None,

@@ -81,19 +81,24 @@ MIN_GAMMA = 0.99
 # the target is evaluated on; from the slow baseline test):
 #   policy   crash rate (test / val)   mean speed [m/s] (test / val)
 #   slower      0% / 0.00               20.0 / 20.0   safe but slow: a crash bound alone is met without learning
-#   idle       71% / 0.60               24.7 / 24.8   the default cruising policy
+#   idle       71% / 0.60               24.7 / 24.76  the default cruising policy
 #   random     80% / 0.70               24.9 / 24.2
 #   faster     99% / 1.00               28.8 / 28.9   fast but crashes
-# "beats_idle": strictly better than idle on both metrics on VAL_SEEDS (crash rate below idle's 0.60, mean speed
-#   above idle's 24.8 m/s). The weak level: the agent has learned something over the default policy.
-# "strong": crash rate <= 0.2 (far below idle) and mean speed >= 25.5 m/s (above idle, far above slower): driving fast
-#   AND safely, i.e. avoiding slow traffic ahead by changing lanes, not by braking. May turn out unreachable.
-TARGET_PERFORMANCE: dict[str, list[dict[str, Any]]] = {  # PLACEHOLDER: decide before training
+# "beats_idle": DECIDED, no team decision needed: it is derived from the idle baseline on VAL_SEEDS. Source: the idle
+#   policy through common.evaluate.validate on all 20 VAL_SEEDS (the call of the slow test
+#   test_no_scripted_baseline_meets_target_performance) gives crash_rate = 0.6 exactly and mean_speed = 24.7564 m/s
+#   (24.756398...). The level is strictly better than idle on both metrics: crash rate below 0.60 and mean speed above
+#   24.8 m/s, idle's speed rounded UP to 0.1 m/s (so slightly stricter than "faster than idle"). The weak level: the agent
+#   has learned something over the default policy. Re-derive it only if VAL_SEEDS or the env change.
+# "strong": PLACEHOLDER, decide before training (after the pilot runs): crash rate <= 0.2 (far below idle) and mean
+#   speed >= 25.5 m/s (above idle, far above slower): driving fast AND safely, i.e. avoiding slow traffic ahead by
+#   changing lanes, not by braking. May turn out unreachable.
+TARGET_PERFORMANCE: dict[str, list[dict[str, Any]]] = {
     "beats_idle": [
-        {"metric": "crash_rate", "operator": "<", "value": 0.6},  # safety: idle 0.60 on VAL_SEEDS
-        {"metric": "mean_speed", "operator": ">", "value": 24.8},  # efficiency [m/s]: idle 24.8 on VAL_SEEDS
+        {"metric": "crash_rate", "operator": "<", "value": 0.6},  # safety: idle 0.6 on VAL_SEEDS
+        {"metric": "mean_speed", "operator": ">", "value": 24.8},  # efficiency [m/s]: idle 24.7564 on VAL_SEEDS, rounded up
     ],
-    "strong": [
+    "strong": [  # PLACEHOLDER: decide before training
         {"metric": "crash_rate", "operator": "<=", "value": 0.2},  # safety
         {"metric": "mean_speed", "operator": ">=", "value": 25.5},  # efficiency [m/s]
     ],
@@ -123,18 +128,38 @@ def indifference_point(w_speed: float, w_right: float, w_collision: float, T: in
     return (g_slow - g_crash) / (g_succ - g_crash)
 
 
-# Seeds. Four disjoint roles; see docs/evaluation_protocol.md and common/seeding.py.
+# Seeds. Disjoint roles; see docs/evaluation_protocol.md and common/seeding.py.
 PILOT_SEEDS: list[int] = list(range(1000, 1050))  # environment pilot (scripted baselines only)
 TRAIN_SEEDS: list[int] = [0, 1, 2, 3, 4]  # main grid: 5 runs per (algorithm, reward)
 SENSITIVITY_SEEDS: list[int] = [0, 1, 2]  # hyperparameter sensitivity: 3 runs
+PILOT_RUN_SEED = 99  # run seed of the hyperparameter tuning runs (one seed per configuration), never a result seed
 VAL_SEEDS: list[int] = list(range(20000, 20020))  # periodic evaluation during training (learning curves)
 TEST_SEEDS: list[int] = list(range(10000, 10100))  # final evaluation, used once
 EVAL_SEEDS = TEST_SEEDS  # backwards-compatible alias
 
-_seed_sets = {"pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "val": VAL_SEEDS, "test": TEST_SEEDS}
+_seed_sets = {
+    "pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "val": VAL_SEEDS, "test": TEST_SEEDS, "pilot_run": [PILOT_RUN_SEED],
+}
 for (_a, _sa), (_b, _sb) in combinations(_seed_sets.items(), 2):
     assert not set(_sa) & set(_sb), f"seed sets {_a} and {_b} overlap"
-assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS)), "seed sets overlap"
+# The sensitivity seeds reuse TRAIN_SEEDS 0..2 on purpose (the base point of a sensitivity table is the main-grid run).
+assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS) | {PILOT_RUN_SEED}), (
+    "seed sets overlap"
+)
+
+# Tuning and sensitivity protocol (shared decisions; docs/config_decisions.md "Shared training decisions").
+# Tuning: at most TUNING_MAX_CONFIGS configurations per algorithm (the defaults + up to 3 variations of algorithm-specific
+# hyperparameters), one run each with seed PILOT_RUN_SEED, validation on VAL_SEEDS only, variant "tune-<name>".
+# The selection criterion is the mean of TUNING_CRITERION_COLUMN over the last TUNING_CRITERION_LAST_POINTS validation
+# points, ties broken by the lower crash_rate (common.aggregate.select_tuning_config).
+TUNING_REWARD = "balanced"
+TUNING_DENSITY = "medium"
+TUNING_MAX_CONFIGS = 4
+TUNING_CRITERION_COLUMN = "return_balanced"
+TUNING_CRITERION_LAST_POINTS = 3
+# Sensitivity runs (common.train_config.SENSITIVITY_GRID): one parameter at a time around the frozen base values.
+SENSITIVITY_REWARD = "balanced"
+SENSITIVITY_DENSITY = "medium"
 
 
 # Test conditions. Each = env id + config overrides on top of BASE_CONFIG + DENSITIES[density].
