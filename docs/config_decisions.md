@@ -28,7 +28,8 @@ compared alternatives and the default won; **chosen** = value differs from the d
 | `policy_frequency` | 1 | 1 | not a studied factor, kept at default | One decision per second (30 decisions per episode); not varied. |
 | `simulation_frequency` | 5 | 5 | not a studied factor, kept at default | Only cost was measured: the former placeholder 15 is about 2.5x slower per step (PA C2). |
 | `vehicles_count` (env) | 20 | 20 | studied, equals default | Idle crash rates for 20 / 30 / 40 vehicles are 54 / 54 / 54% at density 0.7 and 92 / 94 / 94% at 1.0 (noise, n = 50), but 20 vehicles run at 49 steps/s vs 27 and 20 (P sect. 2.3-2.4). All traffic spawns ahead of the ego, so the far end of the platoon is never reached. |
-| other keys (`vehicles_density` base 1.0, `ego_spacing`, `normalize_reward`, rewards of the env, `reward_speed_range`, ...) | not overridden | highway-fast-v0 defaults | not a studied factor, kept at default | `tests/test_config.py` checks that the env config equals the default except `vehicles_density`. |
+| `ego_spacing` | 1.5 | 1.5 (`highway-v0`: 2) | not a studied factor, kept at default (pinned) | Pinned so that evaluation on `highway-v0` (`precise` condition) starts from the same layout as training. |
+| other keys (`vehicles_density` base 1.0, `normalize_reward`, rewards of the env, `reward_speed_range`, ...) | not overridden | highway-fast-v0 defaults | not a studied factor, kept at default | `tests/test_config.py` checks that the env config equals the default except `vehicles_density`. |
 
 ## DENSITIES and training density
 
@@ -79,9 +80,20 @@ Custom rewards are computed by `common.rewards.CustomRewardWrapper` from the rew
 
 | Parameter | Chosen | Default | Status | Justification (pilot number) |
 |---|---|---|---|---|
-| `TRAIN_SEEDS` | `[0, 1, 2]` | n/a | chosen | Three independent training runs per algorithm and setting; disjoint from the evaluation and pilot seeds. |
-| `EVAL_SEEDS` | `range(10000, 10100)` (100 episodes) | n/a (earlier placeholder `range(100, 120)`) | chosen | 100 episodes bring the standard error of a crash rate near 50% to about 5 points (7 points with the pilot's n = 50); disjoint from training seeds 0-2 and pilot seeds 1000-1049 (asserted in `common/config.py`, tested in `tests/test_config.py`). |
+| `TRAIN_SEEDS` | `[0, 1, 2, 3, 4]` | n/a | chosen | Five independent training runs per (algorithm, reward); the seed is the unit of analysis (`docs/evaluation_protocol.md`). |
+| `SENSITIVITY_SEEDS` | `[0, 1, 2]` | n/a | chosen | Three runs per hyperparameter sensitivity setting. |
+| `VAL_SEEDS` | `range(20000, 20020)` (20 episodes) | n/a | chosen | Periodic evaluation during training (learning curves); never used for the final result. |
+| `TEST_SEEDS` (alias `EVAL_SEEDS`) | `range(10000, 10100)` (100 episodes) | n/a (earlier placeholder `range(100, 120)`) | chosen | 100 episodes bring the standard error of a crash rate near 50% to about 5 points (7 points with the pilot's n = 50); used once for the final evaluation. |
 | `PILOT_SEEDS` | `range(1000, 1050)` | n/a | chosen | Kept only to assert disjointness. |
+
+Pilot, train, validation and test seed sets are pairwise disjoint (asserted in `common/config.py`, tested in `tests/test_config.py`).
+
+## TEST_CONDITIONS
+
+Evaluation-only conditions (never used for training), each an env id plus config overrides on top of `BASE_CONFIG` and the density
+preset: `main` (training condition), `low` / `high` (other densities), `long` (60 s, 30 vehicles because 20 was only verified up
+to 30 s in the pilot), `precise` (`highway-v0`, `simulation_frequency=15`, collisions between other vehicles checked). Rationale
+and metrics: `docs/evaluation_protocol.md`.
 
 ## Limitations
 

@@ -53,7 +53,10 @@ The shared settings live in `common/config.py` and were chosen from the environm
   | `safety` | 0.2 | 0.1 | 30 | 0.5 |
 
   Train with gamma >= 0.99. Print the weights and analytic indifference points with `python -m common.config`.
-- **Seeds:** training `[0, 1, 2]`, evaluation `10000..10099` (disjoint from the pilot seeds 1000..1049).
+- **Seeds:** training `[0..4]`, sensitivity `[0, 1, 2]`, validation `20000..20019`, test `10000..10099`, all disjoint from
+  each other and from the pilot seeds 1000..1049.
+- **Test conditions** (evaluation only): `main`, `low`, `high`, `long` (60 s), `precise` (`highway-v0`, 15 Hz); see
+  `docs/evaluation_protocol.md`.
 
 ## Tests
 
@@ -83,10 +86,12 @@ All seeds are fixed (episode seeds 1000..1049, bootstrap seed 0), so the data is
 depend on `--workers` (checked byte for byte with 8 and 4 workers). Use `--resume` with step 1 to continue an
 interrupted run. On Linux/macOS use `.venv/bin/python`.
 
-## Random baseline
+## Scripted baselines
+
+Random, idle, slower and faster policies on every test condition (writes `results/eval/baselines/`):
 
 ```bash
-python -m scripts.random_baseline --episodes 3 --density medium
+python -m scripts.eval_baselines --workers 8 [--resume]
 ```
 
 ## Training
@@ -100,8 +105,16 @@ python -m ppo.train  --reward default --density medium --seed 0 --total-steps 10
 
 ## Evaluation
 
-TODO: evaluation command via `common.evaluate`, and video recording via
-`scripts/record_video.py`.
+The protocol is in `docs/evaluation_protocol.md`. In code:
+
+```python
+from common.evaluate import evaluate, validate
+df = evaluate(agent, condition="main", reward="balanced", workers=4)   # 100 TEST_SEEDS episodes
+curve_point = validate(agent, n=20)                                    # VAL_SEEDS, for learning curves
+```
+
+`common/paths.py` defines where models, logs and test results go; `common/aggregate.py` turns per-episode results into
+per-model values and means over seeds with 95% bootstrap CIs. Video recording: `scripts/record_video.py`.
 
 ## Team
 

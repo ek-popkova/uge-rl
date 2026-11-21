@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import gymnasium as gym
 import highway_env  # noqa: F401
 import pytest
@@ -14,8 +16,11 @@ from common.config import (
     MIN_GAMMA,
     PILOT_SEEDS,
     REWARDS,
+    SENSITIVITY_SEEDS,
+    TEST_SEEDS,
     TRAIN_DENSITY,
     TRAIN_SEEDS,
+    VAL_SEEDS,
     indifference_point,
 )
 from common.envs import make_env
@@ -67,6 +72,16 @@ def test_make_env_defaults_and_no_rendering():
 
 
 def test_seed_sets_are_disjoint():
-    assert not set(EVAL_SEEDS) & set(TRAIN_SEEDS)
-    assert not set(EVAL_SEEDS) & set(PILOT_SEEDS)
-    assert len(EVAL_SEEDS) == 100 and TRAIN_SEEDS == [0, 1, 2]
+    sets = {"pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "val": VAL_SEEDS, "test": TEST_SEEDS}
+    for (a, sa), (b, sb) in itertools.combinations(sets.items(), 2):
+        assert not set(sa) & set(sb), f"{a} and {b} overlap"
+    assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS))
+
+
+def test_seed_set_values():
+    assert TRAIN_SEEDS == [0, 1, 2, 3, 4]
+    assert SENSITIVITY_SEEDS == [0, 1, 2]
+    assert VAL_SEEDS == list(range(20000, 20020))
+    assert TEST_SEEDS == list(range(10000, 10100))
+    assert PILOT_SEEDS == list(range(1000, 1050))
+    assert EVAL_SEEDS is TEST_SEEDS  # backwards-compatible alias

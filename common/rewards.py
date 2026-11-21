@@ -54,6 +54,8 @@ class CustomRewardWrapper(gym.Wrapper):
     Every step's ``info`` gets:
         ``lane_changed``: 1 if ``vehicle.lane_index[2]`` before the step differs from after the
             step (the real lane, not the chosen action), else 0 (also for the default preset).
+        ``env_reward``: the environment's own (normalized) reward before it is replaced, so the
+            default-reward return can be logged for every preset.
         ``custom_reward_components``: signed weighted terms of the custom reward
             (``{}`` for the default preset).
     """
@@ -74,6 +76,7 @@ class CustomRewardWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         lane_changed = int(self.env.unwrapped.vehicle.lane_index[2] != lane_before)
         info["lane_changed"] = lane_changed
+        info["env_reward"] = float(reward)
         if self.weights:
             reward, components = self._custom_reward(info, lane_changed)
             info["custom_reward_components"] = components

@@ -10,6 +10,7 @@ Print the reward weights and their analytic indifference points with:  python -m
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Any
 
 ENV_ID = "highway-fast-v0"
@@ -26,6 +27,9 @@ BASE_CONFIG: dict[str, Any] = {
     "policy_frequency": 1,
     "simulation_frequency": 5,
     "vehicles_count": 20,
+    # highway-fast-v0 default; pinned so that evaluation on highway-v0 (default 2) starts from the
+    # same initial layout as training.
+    "ego_spacing": 1.5,
 }
 
 # Traffic density presets, merged on top of BASE_CONFIG. Only vehicles_density differs.
@@ -81,11 +85,36 @@ def indifference_point(w_speed: float, w_right: float, w_collision: float, T: in
     return (g_slow - g_crash) / (g_succ - g_crash)
 
 
-# Seeds. Evaluation seeds must not overlap with training seeds or the pilot seeds (1000..1049).
-PILOT_SEEDS: list[int] = list(range(1000, 1050))
-TRAIN_SEEDS: list[int] = [0, 1, 2]
-EVAL_SEEDS: list[int] = list(range(10000, 10100))
-assert not set(EVAL_SEEDS) & (set(TRAIN_SEEDS) | set(PILOT_SEEDS)), "seed sets overlap"
+# Seeds. Four disjoint roles; see docs/evaluation_protocol.md and common/seeding.py.
+PILOT_SEEDS: list[int] = list(range(1000, 1050))  # environment pilot (scripted baselines only)
+TRAIN_SEEDS: list[int] = [0, 1, 2, 3, 4]  # main grid: 5 runs per (algorithm, reward)
+SENSITIVITY_SEEDS: list[int] = [0, 1, 2]  # hyperparameter sensitivity: 3 runs
+VAL_SEEDS: list[int] = list(range(20000, 20020))  # periodic evaluation during training (learning curves)
+TEST_SEEDS: list[int] = list(range(10000, 10100))  # final evaluation, used once
+EVAL_SEEDS = TEST_SEEDS  # backwards-compatible alias
+
+_seed_sets = {"pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "val": VAL_SEEDS, "test": TEST_SEEDS}
+for (_a, _sa), (_b, _sb) in combinations(_seed_sets.items(), 2):
+    assert not set(_sa) & set(_sb), f"seed sets {_a} and {_b} overlap"
+assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS)), "seed sets overlap"
+
+
+# Test conditions. Each = env id + config overrides on top of BASE_CONFIG + DENSITIES[density].
+# All conditions are evaluation-only and never used for training (training: ENV_ID, TRAIN_DENSITY).
+#   main:    the training condition, the headline result.
+#   low/high: generalization to other traffic densities.
+#   long:    60 s episodes. Uses 30 vehicles because 20 was only verified up to 30 s in the pilot
+#            (30 and 50 gave identical results up to 60 s).
+#   precise: differs from training only in physics frequency (15 Hz instead of 5 Hz) and in
+#            collisions between other vehicles being enabled (highway-v0 checks them,
+#            highway-fast-v0 does not).
+TEST_CONDITIONS: dict[str, dict[str, Any]] = {
+    "main": {"env_id": ENV_ID, "density": "medium", "overrides": {}},
+    "low": {"env_id": ENV_ID, "density": "low", "overrides": {}},
+    "high": {"env_id": ENV_ID, "density": "high", "overrides": {}},
+    "long": {"env_id": ENV_ID, "density": "medium", "overrides": {"duration": 60, "vehicles_count": 30}},
+    "precise": {"env_id": "highway-v0", "density": "medium", "overrides": {"simulation_frequency": 15}},
+}
 
 
 def describe_rewards() -> str:
