@@ -34,7 +34,9 @@ that the text can be copied into the report. Code: `common/evaluate.py`, `common
 Pilot, train, validation and test sets are pairwise disjoint (asserted in `common/config.py`, tested in
 `tests/test_config.py`). Seeding rules for training runs are in `common/seeding.py`: global seeds from the run seed,
 `env.reset(seed=s)` once and unseeded resets afterwards, exploration from `np.random.default_rng(s)`, vectorized env `i`
-gets seed `s * 1000 + i`.
+gets seed `100000 + s * 1000 + i` (`derived_env_seeds(s, n_envs)`, at most 1000 envs per run). The offset keeps derived
+seeds disjoint from the pilot, validation and test seeds for every run seed (tested for all `TRAIN_SEEDS` and
+`SENSITIVITY_SEEDS` with up to 64 envs).
 
 ## 3. Test conditions
 
@@ -48,6 +50,12 @@ Every condition is an environment id plus config overrides on top of `BASE_CONFI
 | `high` | same, density 1.0 | traffic density | generalization to harder traffic |
 | `long` | same, 60 s, 30 vehicles | episode length (60 s instead of 30 s) | longer drives; does the policy keep driving safely? 30 vehicles because 20 was only verified up to 30 s in the pilot (30 and 50 gave identical results up to 60 s) |
 | `precise` | `highway-v0`, 15 Hz | physics frequency, and collisions between other vehicles are checked | simulator precision: does the policy depend on the coarse 5 Hz physics of the fast variant? |
+
+**Reading `long`.** Crash risk per km is not constant over a 60 s episode, so the `long` crash rate must not be read as
+a rescaled 30 s crash rate, and `long` is compared with other models in `long`, not with `main`. In the baselines,
+idle crashes at 3.2 per 100 steps at risk during the first 30 s and 9.8 per 100 steps during the second 30 s, while
+random stays near 5 in both halves; where the risk comes from depends on the policy and on where the ego is relative to
+the traffic.
 
 `ego_spacing = 1.5` is pinned in `BASE_CONFIG` (it is the `highway-fast-v0` default; `highway-v0` defaults to 2), so
 `precise` starts from the same initial layout as training. `highway-fast-v0` and `highway-v0` differ otherwise only in
@@ -90,11 +98,13 @@ episodes where they are defined.
 ## 6. Aggregation
 
 - **Level 1, per model** (algorithm, reward, seed, condition): mean of the metrics over its 100 test episodes.
-- **Level 2, per (algorithm, reward, condition):** mean over the five training seeds with a 95% percentile bootstrap
-  confidence interval over seeds (10,000 resamples). The training seed is the unit of analysis; pooled episodes are
-  never treated as independent samples. Individual runs (the level-1 values) are plotted next to the mean.
-  With five seeds the bootstrap interval is narrow and cannot exceed the observed range, so it is always read together
-  with the individual runs.
+- **Level 2, per (algorithm, reward, condition):** mean over the five training seeds with a two-sided 95% Student-t
+  interval, `mean +/- t(0.975, n-1) * sd / sqrt(n)` with `n` the number of seeds (`n-1 = 4` in the main grid, t = 2.776)
+  and `sd` the sample standard deviation. With fewer than two seeds no interval is reported. The reason: a bootstrap over
+  five values underestimates the uncertainty (it cannot leave the observed range and ignores that the standard deviation
+  itself is estimated from few runs), and the t-interval is the standard choice for few runs. The training seed is the
+  unit of analysis; pooled episodes are never treated as independent samples. Individual runs (the level-1 values) are
+  always shown next to the mean.
 - Returns are only comparable within one reward preset (a crash costs 15, 20 or 30 depending on the preset). Reward
   presets are compared by behavioural metrics (crash rate, completion rate, mean speed, lane changes, near-miss rate,
   crashes per km). `return_own` is the return under the preset the model was trained with.
@@ -164,7 +174,7 @@ Helpers in `common/paths.py`. `results/` is git-ignored.
 
 Reward weights, densities and `BASE_CONFIG` (`common/config.py`); the seed sets; the test conditions and the number of test
 episodes; the metric definitions including the near-miss threshold of 1.5 s; deterministic evaluation of the final
-checkpoint; the aggregation (seed as unit, 95% bootstrap CI over seeds); gamma >= 0.99; the same step budget and network
+checkpoint; the aggregation (seed as unit, 95% Student-t interval over seeds); gamma >= 0.99; the same step budget and network
 size for both algorithms; the treatment of time-limit truncation. Any deviation is reported as such.
 
 ## References

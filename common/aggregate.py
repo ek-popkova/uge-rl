@@ -3,8 +3,11 @@
 Level 1, per model: one model = (algorithm, train reward, training seed); its metrics under one
 condition are the mean over its test episodes (100 on ``TEST_SEEDS``). ``per_model_table``.
 
-Level 2, per (algorithm, train reward, condition): mean over the training seeds with a 95%
-bootstrap confidence interval over seeds. The training seed is the unit of analysis: the episodes
+Level 2, per (algorithm, train reward, condition): mean over the training seeds with a two-sided
+95% Student-t confidence interval over seeds, mean +/- t(0.975, n-1) * sd / sqrt(n) with n the
+number of seeds (sd with n-1 in the denominator). A bootstrap over a handful of values
+underestimates the uncertainty (it cannot leave the observed range); the t-interval is the
+standard choice for few runs. The training seed is the unit of analysis: the episodes
 of one model are NOT treated as independent samples, and pooled episodes never enter a confidence
 interval (Patterson et al., 2024). The per-seed values stay available in the level-1 table for
 plotting individual runs. ``across_seeds_table``.
@@ -17,7 +20,7 @@ The level-1 column ``return_own`` is the return under the preset the model was t
 
 from __future__ import annotations
 
-from typing import Optional
+import math
 
 import numpy as np
 import pandas as pd
@@ -26,8 +29,15 @@ from common.metrics import add_return_columns, summarize_metrics
 
 MODEL_KEYS = ["algorithm", "train_reward", "train_seed", "condition"]
 GROUP_KEYS = ["algorithm", "train_reward", "condition"]
-N_BOOTSTRAP = 10_000
-CI_LEVEL = 0.95
+
+# Two-sided 95% Student-t quantiles t(0.975, df) for df = 1..30 (checked against the t distribution).
+_T_975 = (
+    12.7062047, 4.3026527, 3.1824463, 2.7764451, 2.5705818, 2.4469119, 2.3646243, 2.3060041,
+    2.2621572, 2.2281389, 2.2009852, 2.1788128, 2.1603687, 2.1447867, 2.1314495, 2.1199053,
+    2.1098156, 2.1009220, 2.0930241, 2.0859634, 2.0796138, 2.0738731, 2.0686576, 2.0638986,
+    2.0595386, 2.0555294, 2.0518305, 2.0484071, 2.0452296, 2.0422725,
+)
+_Z_975 = 1.959963984540054
 
 
 def per_model_table(episodes: pd.DataFrame) -> pd.DataFrame:
@@ -61,57 +71,60 @@ def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return centre - half, centre + half
 
 
-def bootstrap_ci(
-    values: np.ndarray,
-    n_boot: int = N_BOOTSTRAP,
-    level: float = CI_LEVEL,
-    rng: Optional[np.random.Generator] = None,
-) -> tuple[float, float]:
-    """Percentile bootstrap CI of the mean, resampling the entries of ``values`` (the seeds).
+def t_quantile_975(df: int) -> float:
+    """Student-t quantile t(0.975, df) without scipy (table for df <= 30, Cornish-Fisher above)."""
+    if df < 1:
+        raise ValueError("degrees of freedom must be >= 1")
+    if df <= len(_T_975):
+        return _T_975[df - 1]
+    z = _Z_975
+    return z + (z**3 + z) / (4 * df) + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * df**2)
 
-    NaN values are dropped. With fewer than 2 values the interval is NaN. With only a handful of
-    seeds the percentile bootstrap is narrow (it cannot go beyond the observed range), so read
-    it together with the individual runs.
+
+def t_interval(values: np.ndarray) -> tuple[float, float]:
+    """Two-sided 95% t-interval of the mean over ``values`` (one value per training seed).
+
+    mean +/- t(0.975, n-1) * sd / sqrt(n). NaN values are dropped; with fewer than 2 values there
+    is no interval (NaN, NaN).
     """
     values = np.asarray(values, dtype=float)
     values = values[~np.isnan(values)]
-    if len(values) < 2:
+    n = len(values)
+    if n < 2:
         return float("nan"), float("nan")
-    rng = rng if rng is not None else np.random.default_rng(0)
-    idx = rng.integers(0, len(values), size=(n_boot, len(values)))
-    means = values[idx].mean(axis=1)
-    alpha = (1.0 - level) / 2.0
-    lo, hi = np.quantile(means, [alpha, 1.0 - alpha])
-    return float(lo), float(hi)
+    half = t_quantile_975(n - 1) * float(values.std(ddof=1)) / math.sqrt(n)
+    mean = float(values.mean())
+    return mean - half, mean + half
 
 
-def across_seeds_table(per_model: pd.DataFrame, n_boot: int = N_BOOTSTRAP, seed: int = 0) -> pd.DataFrame:
-    """Level 2: mean over training seeds and 95% bootstrap CI per (algorithm, train_reward, condition).
+def across_seeds_table(per_model: pd.DataFrame) -> pd.DataFrame:
+    """Level 2: mean over training seeds and 95% t-interval per (algorithm, train_reward, condition).
 
     Returns a long table with the columns ``algorithm, train_reward, condition, metric, mean,
-    ci_low, ci_high, n_seeds``. The bootstrap RNG is seeded, so the table is reproducible.
+    ci_low, ci_high, n_seeds``. The per-seed values are the rows of ``per_model`` (level 1), kept
+    for plotting individual runs.
     """
     metrics = [c for c in per_model.columns if c not in MODEL_KEYS and c != "n_episodes"]
-    rng = np.random.default_rng(seed)
     rows = []
     for key, df in per_model.groupby(GROUP_KEYS, sort=True):
         for metric in metrics:
             vals = df[metric].to_numpy(dtype=float)
-            lo, hi = bootstrap_ci(vals, n_boot=n_boot, rng=rng)
+            lo, hi = t_interval(vals)
+            valid = ~np.isnan(vals)
             rows.append(
                 {
                     **dict(zip(GROUP_KEYS, key)),
                     "metric": metric,
-                    "mean": float(np.nanmean(vals)) if np.any(~np.isnan(vals)) else float("nan"),
+                    "mean": float(vals[valid].mean()) if valid.any() else float("nan"),
                     "ci_low": lo,
                     "ci_high": hi,
-                    "n_seeds": int(np.sum(~np.isnan(vals))),
+                    "n_seeds": int(valid.sum()),
                 }
             )
     return pd.DataFrame(rows)
 
 
-def aggregate(episodes: pd.DataFrame, n_boot: int = N_BOOTSTRAP) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Both levels at once: ``(per_model, across_seeds)``."""
+def aggregate(episodes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Both levels at once: ``(per_model, across_seeds)``; ``per_model`` holds the per-seed values."""
     per_model = per_model_table(episodes)
-    return per_model, across_seeds_table(per_model, n_boot=n_boot)
+    return per_model, across_seeds_table(per_model)

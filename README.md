@@ -114,7 +114,7 @@ curve_point = validate(agent, n=20)                                    # VAL_SEE
 ```
 
 `common/paths.py` defines where models, logs and test results go; `common/aggregate.py` turns per-episode results into
-per-model values and means over seeds with 95% bootstrap CIs. Video recording: `scripts/record_video.py`.
+per-model values and means over seeds with 95% Student-t intervals. Video recording: `scripts/record_video.py`.
 
 ## Team
 
