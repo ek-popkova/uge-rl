@@ -41,7 +41,37 @@ compared alternatives and the default won; **chosen** = value differs from the d
 
 ## REWARDS
 
-The reward presets in `common/config.py` are still the team-agreed placeholders and are not covered by the pilot.
+Custom rewards are computed by `common.rewards.CustomRewardWrapper` from the reward components of the env, **unnormalized**:
+`r = w_speed*high_speed + w_right*right_lane - w_collision*crashed - w_lane*lane_changed`, with `high_speed`, `right_lane` in
+[0, 1] from `info["rewards"]`, `crashed = info["crashed"]` and `lane_changed` = real change of `lane_index[2]` during the step
+(not the chosen action). `REWARDS["default"]` keeps the env's own normalized reward unchanged.
+
+| Variant (assignment) | w_speed | w_right | w_collision | w_lane | analytic p | Meaning |
+|---|---:|---:|---:|---:|---:|---|
+| `efficiency` (Reward A) | 0.8 | 0.0 | 15 | 0.0 | 0.27 | Speed first, lane position irrelevant, risk-tolerant. |
+| `balanced` (Reward B) | 0.4 | 0.1 | 20 | 0.1 | 0.61 | Moderate speed, keep right, mild lane-change penalty. |
+| `safety` (Reward C) | 0.2 | 0.1 | 30 | 0.5 | 0.83 | Weak speed incentive, harsh crash penalty, costly lane changes. |
+
+`python -m common.config` prints the weights and the analytic indifference points (`common.config.indifference_point`).
+
+- **`w_right`** encodes the keep-right traffic rule. **`w_lane`** is applied by the wrapper because highway-env 1.12.1 ignores
+  the config key `lane_change_reward` (its `_rewards()` returns only the collision, right_lane, high_speed and on_road components).
+- **Why unnormalized.** The env's normalization maps [collision, speed + right_lane] to [0, 1]. This adds a per-step survival
+  bonus (an alive step that earns nothing already gets 0.667 with the default weights) and shrinks the speed signal as the
+  collision weight grows, so the collision weight no longer acts as a penalty. The default reward illustrates this: in the pilot,
+  crawling (`slower`) out-earned driving at normal speed (`idle`), mean return 20.9 > 12.9 (P, sect. 5 of the earlier report).
+- **Why these collision penalties.** 15 / 20 / 30 are the smallest round values that pass the Knox et al. (2023, sect. 4.3)
+  ordering test G_crash < G_slow < G_succ at every density (low density is the binding case, because crashes happen later
+  there and so cost less relative to the episode), while keeping a clear caution gradient efficiency < balanced < safety.
+- **Replaced derivation.** The earlier target-p derivation (`collision_weight(target_p, ...)` with p = 0.25 / 0.50 / 0.75,
+  giving w_collision = 14.25 / 32.25 / 86.25 and w_speed = 0.9, w_right = 0.1, w_lane = 0.0 / 0.1 / 0.3) was replaced by the
+  fixed weights above. It is kept only as history in git (branch `backup/pre-reward-removal`, if still present).
+- **Discount factor.** Train with gamma >= 0.99 (`MIN_GAMMA`). With gamma <= 0.9 a late crash is discounted so much that
+  the lighter variants can rank a crash above slow safe driving.
+- **Caveat.** The lane-change penalty of `safety` (0.5) exceeds its per-step maximum reward (0.2 + 0.1 = 0.3), so a safety
+  agent is expected to change lanes rarely, even when a lane change would be useful in dense traffic.
+- **Empirical check.** The analytic p values use idealized episodes. The empirical re-check on the pilot logs
+  (`results/pilot/reward_final_v2/`) has **not** been run yet.
 
 ## Seeds
 
@@ -59,3 +89,5 @@ The reward presets in `common/config.py` are still the team-agreed placeholders 
 
 - Patterson, A., Neumann, S., White, M., White, A. (2024). *Empirical Design in Reinforcement Learning.* Journal of Machine
   Learning Research (sections 4.2 and 5.3 as cited above).
+- Knox, W. B., Allievi, A., Banzhaf, H., Schmitt, F., Stone, P. (2023). *Reward (Mis)design for Autonomous Driving.*
+  Artificial Intelligence (sections 4.2-4.3 as cited above).

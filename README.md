@@ -15,7 +15,7 @@ conditions, so all shared code lives in the `common/` package.
 ├── ddqn/         # Double DQN implementation
 ├── ppo/          # PPO implementation
 ├── scripts/      # random baseline, video recording, pilot experiments (scripts/pilot/)
-├── tests/        # pytest tests for the config and the env factory
+├── tests/        # pytest tests for the config and the reward wrapper
 ├── docs/         # config_decisions.md, performance_analysis.md
 ├── notebooks/    # analysis notebooks
 └── results/      # local outputs (ignored by git)
@@ -43,7 +43,16 @@ The shared settings live in `common/config.py` and were chosen from the environm
   at the environment defaults.
 - **Traffic density** (only `vehicles_density` differs): low 0.4, medium 0.7, high 1.0. Training uses
   `TRAIN_DENSITY = "medium"`; evaluation covers all three.
-- **Rewards** (`--reward`): placeholders for now; `default` keeps the environment's own reward.
+- **Rewards** (`--reward`): `default` is the environment's own normalized reward. The custom variants are unnormalized,
+  `r = w_speed*high_speed + w_right*right_lane - w_collision*crashed - w_lane*lane_changed`:
+
+  | reward | w_speed | w_right | w_collision | w_lane |
+  |---|---:|---:|---:|---:|
+  | `efficiency` | 0.8 | 0.0 | 15 | 0.0 |
+  | `balanced` | 0.4 | 0.1 | 20 | 0.1 |
+  | `safety` | 0.2 | 0.1 | 30 | 0.5 |
+
+  Train with gamma >= 0.99. Print the weights and analytic indifference points with `python -m common.config`.
 - **Seeds:** training `[0, 1, 2]`, evaluation `10000..10099` (disjoint from the pilot seeds 1000..1049).
 
 ## Tests
