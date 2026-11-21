@@ -10,6 +10,7 @@ identical starting situations. Outputs:
 
 Usage (from the repository root):
     python -m scripts.eval_baselines --workers 6 [--resume]
+    python -m scripts.eval_baselines --summary-only      # rebuild summary.csv from the per-episode CSVs, no simulation
 """
 
 from __future__ import annotations
@@ -77,6 +78,21 @@ def write_task(task_dir: Path, stem: str, task, res) -> None:
     os.replace(tmp, task_dir / f"{stem}.csv")  # csv last: its presence marks a finished task
 
 
+def summarize_condition(df: pd.DataFrame, condition: str) -> list[dict]:
+    """Summary rows (one per policy) of the per-episode frame of one condition."""
+    rows = []
+    for policy, pdf in df.groupby("policy", sort=False):
+        row = {"policy": policy, "condition": condition, **summarize_metrics(pdf)}
+        row["crash_ci_low"], row["crash_ci_high"] = wilson_interval(int(pdf["crashed"].sum()), len(pdf))
+        rows.append(row)
+    return rows
+
+
+def print_summary(summary: pd.DataFrame) -> None:
+    show = ["policy", "condition", "crash_rate", "completion_rate", "mean_speed", "crashes_per_km", "near_miss_rate"]
+    print(summary[show].to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--workers", type=int, default=6, help="processes (scaling plateaus near 8 here)")
@@ -89,7 +105,18 @@ def main() -> None:
     ap.add_argument("--force", action="store_true", help="start even if the estimate exceeds --max-minutes")
     ap.add_argument("--resume", action="store_true", help="skip tasks that already have result files")
     ap.add_argument("--out", type=Path, default=baselines_dir())
+    ap.add_argument("--summary-only", action="store_true",
+                    help="rebuild summary.csv from the existing <condition>.csv files (no simulation, CLAUDE.md rule 9)")
     args = ap.parse_args()
+
+    if args.summary_only:  # new summary metrics derive from columns the per-episode CSVs already hold
+        rows = []
+        for cond in args.conditions:
+            rows += summarize_condition(add_return_columns(pd.read_csv(args.out / f"{cond}.csv")), cond)
+        summary = pd.DataFrame(rows)
+        summary.to_csv(args.out / "summary.csv", index=False)
+        print_summary(summary)
+        return
 
     seeds = TEST_SEEDS[: args.episodes]
     task_dir = args.out / "_tasks"
@@ -157,16 +184,12 @@ def main() -> None:
             "steps_per_s_per_process": steps / wall if wall else None,
             "quiet_benchmark_steps_per_s": speed[cond],
         }
-        for policy, pdf in df.groupby("policy", sort=False):
-            row = {"policy": policy, "condition": cond, **summarize_metrics(pdf)}
-            row["crash_ci_low"], row["crash_ci_high"] = wilson_interval(int(pdf["crashed"].sum()), len(pdf))
-            summary_rows.append(row)
+        summary_rows += summarize_condition(df, cond)
     summary = pd.DataFrame(summary_rows)
     summary.to_csv(args.out / "summary.csv", index=False)
     (args.out / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    show = ["policy", "condition", "crash_rate", "completion_rate", "mean_speed", "crashes_per_km", "near_miss_rate"]
-    print(summary[show].to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    print_summary(summary)
     print(f"wall time of this run: {wall_total / 60:.1f} min")
     for cond, m in meta["conditions"].items():
         print(f"  {cond:<8} {m['task_wall_s_sum'] / 60:6.1f} process-min, {m['steps_per_s_per_process']:.1f} steps/s per process")

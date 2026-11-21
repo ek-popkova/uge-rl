@@ -52,6 +52,7 @@ class TorchGreedyAgent(Agent):
 
 
 # ---- conditions --------------------------------------------------------------------------------
+@pytest.mark.slow
 @pytest.mark.parametrize("name", list(TEST_CONDITIONS))
 def test_make_test_env_config(name):
     spec = TEST_CONDITIONS[name]
@@ -65,6 +66,7 @@ def test_make_test_env_config(name):
     assert env.unwrapped.render_mode is None and env.unwrapped.viewer is None
 
 
+@pytest.mark.slow
 def test_condition_values():
     c = {n: make_test_env(n).unwrapped.config for n in TEST_CONDITIONS}
     densities = (c["main"]["vehicles_density"], c["low"]["vehicles_density"], c["high"]["vehicles_density"])
@@ -79,6 +81,7 @@ def test_condition_values():
     assert all(v.check_collisions for v in precise.road.vehicles)
 
 
+@pytest.mark.slow
 def test_make_env_overrides_merge_last_and_defaults_unchanged():
     env = make_env(density="low", overrides={"vehicles_density": 0.9, "duration": 12})
     assert env.unwrapped.config["vehicles_density"] == 0.9 and env.unwrapped.config["duration"] == 12
@@ -88,12 +91,14 @@ def test_make_env_overrides_merge_last_and_defaults_unchanged():
         make_test_env("nope")
 
 
+@pytest.mark.slow
 def test_baseline_action_indices_match_env():
     idx = make_env().unwrapped.action_type.actions_indexes
     assert {k: idx[k] for k in ACTION_INDEX} == ACTION_INDEX
 
 
 # ---- determinism --------------------------------------------------------------------------------
+@pytest.mark.slow
 def test_env_reuse_equals_fresh_env():
     agent = make_baseline("faster")
     a = evaluate(agent, "main", "balanced", SEEDS)  # one reused env, seeds in order
@@ -101,6 +106,7 @@ def test_env_reuse_equals_fresh_env():
     pd.testing.assert_frame_equal(a, b)
 
 
+@pytest.mark.slow
 def test_same_policy_twice_identical_and_worker_independent():
     for agent in (make_baseline("random", seed=3), TorchGreedyAgent()):
         first = evaluate(agent, "main", "balanced", SEEDS, workers=1, chunk_size=6)
@@ -110,6 +116,7 @@ def test_same_policy_twice_identical_and_worker_independent():
         pd.testing.assert_frame_equal(first, parallel)
 
 
+@pytest.mark.slow
 def test_random_baseline_is_seeded_per_episode_not_per_order():
     agent = make_baseline("random", seed=1)
     full = evaluate(agent, "main", "default", SEEDS)
@@ -128,6 +135,7 @@ def test_make_chunks_and_validation_args():
 
 
 # ---- return recomputation ---------------------------------------------------------------------------
+@pytest.mark.slow
 @pytest.mark.parametrize("reward", list(REWARDS))
 @pytest.mark.parametrize("policy", ["random", "faster"])
 def test_recompute_return_matches_wrapper(reward, policy):
@@ -139,6 +147,7 @@ def test_recompute_return_matches_wrapper(reward, policy):
         np.testing.assert_allclose(recompute_return(df, other), ref["episode_return"], atol=1e-9)
 
 
+@pytest.mark.slow
 def test_return_env_is_independent_of_reward_preset():
     a = evaluate(make_baseline("random"), "main", "safety", SEEDS[:4])
     b = evaluate(make_baseline("random"), "main", "default", SEEDS[:4])
@@ -148,6 +157,7 @@ def test_return_env_is_independent_of_reward_preset():
 
 
 # ---- metrics -------------------------------------------------------------------------------------------
+@pytest.mark.slow
 def test_episode_metrics_consistency():
     df = evaluate(make_baseline("faster"), "main", "balanced", SEEDS)  # crashes often
     assert (df["completed"] == (~df["crashed"] & (df["length"] == 30))).all()
@@ -167,9 +177,22 @@ def test_gap_and_ttc():
     assert NEAR_MISS_TTC == 1.5
 
 
+@pytest.mark.slow
 def test_validate_returns_mean_metrics_on_val_seeds():
     out = validate(make_baseline("slower"), n=2)
     assert out["n_episodes"] == 2 and out["crash_rate"] == 0.0
+
+
+@pytest.mark.slow
+def test_validate_returns_every_reward_preset():
+    # the curve under the training reward and under every other preset come from the same episodes
+    out = validate(make_baseline("faster"), n=2, reward="safety")
+    assert {f"return_{r}" for r in REWARDS} <= set(out)
+    assert out["return_default"] == pytest.approx(out["return_env"])
+    assert out["episode_return"] == pytest.approx(out["return_safety"])  # trained under safety
+    df = evaluate(make_baseline("faster"), "main", "safety", VAL_SEEDS[:2])
+    for r in REWARDS:
+        assert out[f"return_{r}"] == pytest.approx(recompute_return(df, r).mean())
 
 
 # ---- aggregation ----------------------------------------------------------------------------------------
@@ -182,7 +205,7 @@ def _fake_episodes() -> pd.DataFrame:
                 crashed = bool(rng.random() < (0.2 if algo == "ddqn" else 0.4))
                 rows.append(
                     dict(
-                        algorithm=algo, train_reward="balanced", train_seed=seed, condition="main", seed=ep,
+                        algorithm=algo, train_reward="balanced", variant="main", train_seed=seed, condition="main", seed=ep,
                         episode_return=1.0, return_env=1.0, sum_high_speed=10.0, sum_right_lane=5.0,
                         lane_changes=1, crashed=crashed, completed=not crashed, near_miss=False, length=30,
                         mean_speed=25.0, distance_m=750.0, min_gap=10.0, min_ttc=3.0,
@@ -237,6 +260,7 @@ def test_wilson():
 
 
 # ---- baselines & layout ------------------------------------------------------------------------------------
+@pytest.mark.slow
 def test_scripted_baselines_basic_behaviour():
     slower = evaluate(make_baseline("slower"), "main", "default", SEEDS)
     assert not slower["crashed"].any() and slower["completed"].all()
@@ -245,20 +269,31 @@ def test_scripted_baselines_basic_behaviour():
         make_baseline("nope")
 
 
+@pytest.mark.slow
 def test_paths_layout_and_loader(tmp_path):
-    assert run_dir("ddqn", "safety", 3, tmp_path) == tmp_path / "runs" / "ddqn" / "safety" / "seed3"
+    assert run_dir("ddqn", "safety", 3, tmp_path) == tmp_path / "runs" / "ddqn" / "safety" / "main" / "seed3"
     assert final_checkpoint("ppo", "balanced", 0, tmp_path).name == "final.pt"
     assert train_log("ppo", "balanced", 0, tmp_path).name == "train_log.csv"
     assert val_log("ppo", "balanced", 0, tmp_path).name == "val_log.csv"
-    expected = tmp_path / "eval" / "ppo" / "balanced" / "seed4" / "long.csv"
+    expected = tmp_path / "eval" / "ppo" / "balanced" / "main" / "seed4" / "long.csv"
     assert eval_csv("ppo", "balanced", 4, "long", tmp_path) == expected
     with pytest.raises(ValueError):
         run_dir("a2c", "balanced", 0, tmp_path)
     df = evaluate(make_baseline("slower"), "main", "default", SEEDS[:2])
     save_eval(df, "ddqn", "safety", 2, "main", tmp_path)
+    save_eval(df, "ddqn", "safety", 2, "main", tmp_path, variant="lr=0.0003")  # sensitivity run, same seed
     loaded = load_eval_episodes(tmp_path)
     assert list(loaded["algorithm"].unique()) == ["ddqn"] and loaded["train_seed"].eq(2).all()
     assert loaded["train_reward"].eq("safety").all() and loaded["condition"].eq("main").all()
+    assert sorted(loaded["variant"].unique()) == ["lr=0.0003", "main"]  # both runs kept apart
+    per_model = per_model_table(loaded)
+    assert len(per_model) == 2 and sorted(per_model["variant"]) == ["lr=0.0003", "main"]
+
+
+def test_old_layout_without_variant_is_refused(tmp_path):
+    (tmp_path / "eval" / "ppo" / "balanced" / "seed0").mkdir(parents=True)
+    with pytest.raises(ValueError, match="variant"):
+        load_eval_episodes(tmp_path)
 
 
 def test_derived_env_seeds_disjoint_from_pilot_val_test():

@@ -95,6 +95,12 @@ preset: `main` (training condition), `low` / `high` (other densities), `long` (6
 to 30 s in the pilot), `precise` (`highway-v0`, `simulation_frequency=15`, collisions between other vehicles checked). Rationale
 and metrics: `docs/evaluation_protocol.md`.
 
+## TARGET_PERFORMANCE (placeholder)
+
+| Parameter | Value | Status | Meaning |
+|---|---|---|---|
+| `TARGET_PERFORMANCE` | `[crash_rate <= 0.2, mean_speed >= 25.5]` (all must hold) | **placeholder, decide before training** | the validation point at which a run counts as having reached the target (`common.aggregate.steps_to_threshold`, "env steps to target performance" in the cost comparison); behavioural metrics, so it is comparable across reward presets. It is joint on purpose and must stay unreachable for the scripted baselines: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone would reward braking; `idle` crashes in 71% of the episodes at 24.7 m/s (`docs/evaluation_protocol.md` section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.2, idle 0.60 / 24.8, slower 0.00 / 20.0, faster 1.00 / 28.9 m/s (guarded by a test). Fixed before any training run and not changed after seeing results (`docs/evaluation_protocol.md` sections 7 and 10). The budget and the hyperparameters (`common/train_config.py`) are placeholders too. |
+
 ## Limitations
 
 - **Training only at medium density.** Generalization to low and high density is evaluated, not trained.

@@ -12,12 +12,10 @@ from typing import Any
 
 import numpy as np
 
+from common.actions import ACTION_INDEX, N_ACTIONS  # noqa: F401  (indices checked by tests/test_evaluate.py)
 from common.agent_base import Agent
 from common.evaluate import run_chunk
 
-# DiscreteMetaAction indices in highway-env 1.12.1 (checked by tests/test_evaluate.py).
-ACTION_INDEX = {"LANE_LEFT": 0, "IDLE": 1, "LANE_RIGHT": 2, "FASTER": 3, "SLOWER": 4}
-N_ACTIONS = len(ACTION_INDEX)
 BASELINE_NAMES = ("random", "idle", "slower", "faster")
 
 

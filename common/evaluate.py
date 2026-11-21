@@ -20,7 +20,7 @@ import pandas as pd
 from common.agent_base import Agent
 from common.config import REWARDS, TEST_CONDITIONS, TEST_SEEDS, VAL_SEEDS
 from common.envs import make_test_env
-from common.metrics import EpisodeRecorder, summarize_metrics
+from common.metrics import EpisodeRecorder, add_return_columns, summarize_metrics
 from common.parallel import limit_threads, run_tasks
 
 AgentSpec = Union[Agent, Callable[[], Agent]]
@@ -46,7 +46,7 @@ def run_episode(env: gym.Env, agent: Agent, seed: int) -> dict[str, Any]:
     while not (terminated or truncated):
         action = agent.act(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
-        rec.step(reward, info)
+        rec.step(reward, info, action)
     return rec.finish(seed, truncated, info)
 
 
@@ -129,8 +129,14 @@ def validate(
 
     Intended for learning curves during training: call it every N steps and append the result to
     ``val_log.csv``. Never selects or tunes anything on ``TEST_SEEDS``.
+
+    ``reward`` is the preset the validation env is built with (use the training reward, so
+    ``episode_return`` is the return the agent optimizes). The result also holds
+    ``return_<preset>`` for EVERY reward preset (recomputed from the per-episode components), so the
+    curve under the training reward and under the default reward are both available without
+    re-running the episodes.
     """
     if not 0 < n <= len(VAL_SEEDS):
         raise ValueError(f"n must be in 1..{len(VAL_SEEDS)}, got {n}")
     df = evaluate(agent, "main", reward, VAL_SEEDS[:n], workers=workers, chunk_size=max(n // max(workers, 1), 1))
-    return summarize_metrics(df, extra_prefix=None)
+    return summarize_metrics(add_return_columns(df))

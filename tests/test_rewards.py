@@ -109,6 +109,7 @@ def _run(env, n_episodes=3, seed=1000, rng_seed=0):
             done = term or trunc
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("name", ["efficiency", "balanced", "safety"])
 @pytest.mark.parametrize("density", ["low", "high"])
 def test_real_env_reward_equals_formula_at_every_step(name, density):
@@ -129,6 +130,7 @@ def test_real_env_reward_equals_formula_at_every_step(name, density):
         assert n_crash > 0
 
 
+@pytest.mark.slow
 def test_real_env_default_equals_plain_env_reward():
     config = {**BASE_CONFIG, **DENSITIES["medium"]}
     plain = gym.make(ENV_ID, config=config)
@@ -140,6 +142,7 @@ def test_real_env_default_equals_plain_env_reward():
     assert n > 0
 
 
+@pytest.mark.slow
 def test_custom_reward_independent_of_normalize_reward():
     """The custom reward uses info['rewards'] components, so the env's normalization is irrelevant."""
     out = {}

@@ -67,6 +67,30 @@ REWARDS: dict[str, dict[str, float]] = {
 MIN_GAMMA = 0.99
 
 
+# Target performance for the "env steps to reach a target" metric (common.aggregate.steps_to_threshold):
+# the first validation point (VAL_SEEDS, "main" condition) at which EVERY condition below holds, each a
+# `metric <operator> value` on a column of val_log.csv (common.metrics.SUMMARY_COLUMNS). Behavioural metrics
+# only, so the target is comparable across reward presets (returns are not). Must be fixed before any
+# training run and never changed after seeing results (docs/evaluation_protocol.md section 10).
+#
+# The target must be JOINT (one safety and one efficiency condition) and UNREACHABLE for every scripted
+# baseline, otherwise an agent that merely learns a trivial policy would win "steps to target"
+# (tests/test_training.py::test_no_scripted_baseline_meets_target_performance checks it on VAL_SEEDS).
+# Baselines on `main` (TEST_SEEDS, docs/evaluation_protocol.md section 8):
+#   policy   crash rate  mean speed
+#   slower      0%        20.0 m/s   safe but slow: a crash bound alone would be met without learning anything
+#   idle       71%        24.7 m/s   the default cruising policy
+#   random     80%        24.9 m/s
+#   faster     99%        28.8 m/s   fast but crashes
+# Placeholder values: crash rate <= 0.2 is far below idle (71%), mean speed >= 25.5 m/s is above idle (24.7) and
+# far above slower (20.0). Neither alone separates learning from a trivial policy; together they require
+# driving fast AND safely (an agent has to avoid slow traffic ahead by changing lanes, not by braking).
+TARGET_PERFORMANCE: list[dict[str, Any]] = [  # PLACEHOLDER: decide before training
+    {"metric": "crash_rate", "operator": "<=", "value": 0.2},  # safety
+    {"metric": "mean_speed", "operator": ">=", "value": 25.5},  # efficiency [m/s]
+]
+
+
 def indifference_point(w_speed: float, w_right: float, w_collision: float, T: int = 30) -> float | None:
     """Analytic indifference point p of a reward variant (analysis helper, not used in training).
 

@@ -48,12 +48,14 @@ def test_indifference_point_none_when_ordering_fails():
     assert indifference_point(w_speed=0.8, w_right=0.0, w_collision=1.0) is None
 
 
+@pytest.mark.slow
 def test_base_config_equals_env_defaults():
     defaults = gym.make(ENV_ID).unwrapped.config
     for key, value in BASE_CONFIG.items():
         assert defaults[key] == value, f"{key}: config {value} != highway-fast-v0 default {defaults[key]}"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("density", list(DENSITIES))
 def test_env_config_differs_from_default_only_in_density(density):
     default = gym.make(ENV_ID).unwrapped.config
@@ -64,6 +66,7 @@ def test_env_config_differs_from_default_only_in_density(density):
     assert env_cfg["observation"] == {"type": "Kinematics"}  # default observation: 5 vehicles
 
 
+@pytest.mark.slow
 def test_make_env_defaults_and_no_rendering():
     env = make_env()  # TRAIN_DENSITY, default reward
     assert env.unwrapped.config["vehicles_density"] == DENSITIES[TRAIN_DENSITY]["vehicles_density"]

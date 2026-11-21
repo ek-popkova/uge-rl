@@ -2,7 +2,9 @@
 
 This protocol is fixed before any agent is trained. It describes how DDQN and PPO are trained, tested and compared, so
 that the text can be copied into the report. Code: `common/evaluate.py`, `common/metrics.py`, `common/aggregate.py`,
-`common/baselines.py`, `common/paths.py`, `common/seeding.py`; values: `common/config.py`.
+`common/baselines.py`, `common/paths.py`, `common/seeding.py`; training-time tracking: `common/training.py`,
+`common/train_logging.py`, `common/train_env.py`, `common/run_meta.py`, `common/benchmark.py`,
+`common/train_config.py`; values: `common/config.py`.
 
 ## 1. Models
 
@@ -95,14 +97,32 @@ Recorded per episode in a single pass (`common.metrics`):
 | `min_gap` | minimum bumper-to-bumper gap to the leader (nearest vehicle ahead in the ego lane) over the episode [m] |
 | `min_ttc` | minimum time-to-collision `gap / (v_ego - v_leader)` over the steps in which the ego closes in on the leader [s]; a gap of 0 or less counts as 0; undefined if it never closes in |
 | `near_miss` | not crashed and `min_ttc < 1.5 s` (`NEAR_MISS_TTC`); fixed before training |
+| `near_miss_steps` | number of steps whose state has TTC < `NEAR_MISS_TTC`, a rate in addition to the per-episode flag; the final crash step is not counted (a crash is not a near miss) |
+| `truncated` | the time limit ended the episode (`completed` = `truncated` and not `crashed`) |
+| `act_LANE_LEFT`, `act_IDLE`, `act_LANE_RIGHT`, `act_FASTER`, `act_SLOWER` | how often the agent chose each meta-action (action histogram); the five counts sum to `length` |
+| `lane0_steps` ... `lane2_steps` | steps spent in each lane after the step (0 = leftmost); sum to `length` |
+| `rightmost_lane_share` | `lane2_steps / length` |
+| `lane_change_reversals` | lane changes that undo the immediately preceding lane change within `REVERSAL_WINDOW = 3` steps (A to B, then B to A; every change in A-B-A-B counts, so that is 2); fixed before training, next to `NEAR_MISS_TTC` in `common/metrics.py` |
+| `speed_std` | standard deviation (ddof 0) of the ego speed over the steps [m/s] |
+| `n_speed_changes` | steps in which the ego target speed changed (a FASTER / SLOWER that took effect; at the speed limits it does not) |
+| `overtakes` | vehicles that were ahead of the ego at the start and are behind it at the end, any lane (net passes). **Compared per km, not per episode:** `overtakes_per_km` = total overtakes / total km, the ratio of sums exactly like `crashes_per_km`, because the per-episode count grows with speed and survival time (an episode that crashes after 5 s has almost none) |
 
 Gap and TTC use the state after every step and the initial state. Mean `min_gap` and `min_ttc` are averages over the
-episodes where they are defined.
+episodes where they are defined. Counts (`act_*`, `lane*_steps`, `near_miss_steps`, ...) are summarized as means of
+per-episode counts, so they depend on the episode length; divide by `length` for shares.
+
+**`overtakes` is robust here, but it counts passes, not manoeuvres.** In `highway-env` 1.12.1 the road is never
+emptied of vehicles (tested for `main` and `precise`) and every other vehicle spawns ahead of the ego (tested), so
+"ahead at the start" is a well-defined set that is compared with the ego position only twice (start, end), with no
+extra simulation. It does not tell an active overtake from a vehicle that changed lane or slowed down; the videos
+(section 11) decide that. A vehicle that passes the ego again is not counted. It is a behavioural indicator, not a
+measure of skill. The per-episode `overtakes` column is kept; summaries and aggregated tables use `overtakes_per_km`.
 
 ## 6. Aggregation
 
-- **Level 1, per model** (algorithm, reward, seed, condition): mean of the metrics over its 100 test episodes.
-- **Level 2, per (algorithm, reward, condition):** mean over the five training seeds with a two-sided 95% Student-t
+- **Level 1, per model** (algorithm, reward, variant, seed, condition): mean of the metrics over its 100 test episodes.
+  `variant` is `main` for the main grid and the sensitivity-run name otherwise (section 11).
+- **Level 2, per (algorithm, reward, variant, condition):** mean over the five training seeds with a two-sided 95% Student-t
   interval, `mean +/- t(0.975, n-1) * sd / sqrt(n)` with `n` the number of seeds (`n-1 = 4` in the main grid, t = 2.776)
   and `sd` the sample standard deviation. With fewer than two seeds no interval is reported. The reason: a bootstrap over
   five values underestimates the uncertainty (it cannot leave the observed range and ignores that the standard deviation
@@ -115,9 +135,37 @@ episodes where they are defined.
 
 ## 7. Learning curves
 
-During training, `common.evaluate.validate(agent, n=20)` runs the agent on 20 `VAL_SEEDS` episodes in the `main`
-condition every N environment steps (same N for both algorithms) and appends the mean metrics and the step count to
-`val_log.csv`. Curves are shown per seed together with the mean over seeds.
+During training, `common.evaluate.validate(agent, n=val_n_episodes, reward=<training reward>)` runs the agent on the
+first `val_n_episodes` `VAL_SEEDS` episodes (at most 20) in the `main` condition every `val_every_env_steps`
+environment steps (same schedule for both algorithms) and appends one row to `val_log.csv` (section 11). The x-axis is
+always `env_step` (transitions summed over vector envs), never episodes or updates. A validation runs at the first update
+boundary at or after each multiple of the interval (DDQN: every step, PPO: after every rollout of `n_envs * n_steps`
+steps) and the actual `env_step` is stored; a last validation always happens at the end of the budget.
+
+- **Both reward views from one run.** `validate()` returns `episode_return` under the reward the validation env was
+  built with (the training reward) and `return_<preset>` for every preset (`default`, `efficiency`, `balanced`,
+  `safety`), recomputed from the per-episode components, so the curve under the training reward and under the default
+  reward are both available without re-running anything. Returns of different presets are not comparable with each
+  other (section 6).
+- **Alignment across seeds.** Curves are shown per seed together with the mean over seeds. `learning_curve_table`
+  aligns the k-th validation of every seed (by validation index `val_idx`, not by `env_step`, because the actual steps of
+  PPO differ slightly between runs) and returns the mean and the 95% Student-t interval over seeds per point (`n - 1`
+  degrees of freedom with `n` the seeds that have that point). The reported x is the mean of the aligned `env_step`
+  values (min and max are given too).
+- **Area under the curve** (`curve_auc`, `auc_across_seeds`): trapezoid rule over `env_step` from the first to the last
+  validation point, divided by the step span (so it is the average value of the metric during training, in the units of
+  the metric); per seed first, then mean and t-interval over seeds.
+- **Steps to a target** (`steps_to_threshold`, target in `common.config.TARGET_PERFORMANCE`): the `env_step` and the
+  training wall time (without validation time, `train_wall_s`) of the first validation point at which EVERY condition of
+  the target holds; NaN if it is never met. The target is a **joint** list of behavioural conditions (comparable across
+  reward presets), at least one safety and one efficiency condition (`crash_rate <= ...` and `mean_speed >= ...`; validated
+  at import), fixed before training (section 10). It must stay **unreachable for the scripted baselines**: `slower` has a
+  0% crash rate at 20 m/s on `main`, so a crash bound alone would reward an agent that only learns to brake; `idle`
+  crashes in 71% of the episodes at 24.7 m/s; the speed bound must lie above idle and the crash bound far below it.
+  `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` runs the four baselines through
+  `validate()` on `VAL_SEEDS` and fails if one of them meets the target, which guards the values against later edits.
+  With 20 validation episodes a single crossing can be luck, so the function also accepts `consecutive=k` (the first of
+  `k` points in a row at which all conditions hold); the reported default is the plain first crossing.
 
 ## 8. Baselines
 
@@ -170,21 +218,82 @@ difficulty before any agent is tested; a trained agent can still be sensitive to
 ## 9. File layout
 
 ```
-results/runs/<algo>/<reward>/seed<s>/final.pt          final checkpoint
-results/runs/<algo>/<reward>/seed<s>/train_log.csv     training log
-results/runs/<algo>/<reward>/seed<s>/val_log.csv       step + validation metrics
-results/eval/<algo>/<reward>/seed<s>/<condition>.csv   per-episode test results
-results/eval/baselines/<condition>.csv, summary.csv    scripted baselines
+results/runs/<algo>/<reward>/<variant>/seed<s>/final.pt              final checkpoint (agent weights)
+results/runs/<algo>/<reward>/<variant>/seed<s>/milestone_<p>pct.pt   weights at p% of the budget (early vs late)
+results/runs/<algo>/<reward>/<variant>/seed<s>/resume.pt             full state for --resume (overwritten)
+results/runs/<algo>/<reward>/<variant>/seed<s>/train_log.csv         one row per training episode
+results/runs/<algo>/<reward>/<variant>/seed<s>/update_log.csv        one row per (K) gradient update(s)
+results/runs/<algo>/<reward>/<variant>/seed<s>/val_log.csv           validation metrics, one row per validation
+results/runs/<algo>/<reward>/<variant>/seed<s>/run_meta.json         identity, config, timing, versions
+results/eval/<algo>/<reward>/<variant>/seed<s>/<condition>.csv       per-episode test results
+results/eval/baselines/<condition>.csv, summary.csv                  scripted baselines
 ```
 
-Helpers in `common/paths.py`. `results/` is git-ignored.
+`<variant>` is `main` for the 40 main-grid models. A sensitivity run is a variant named from its overrides by
+`common.train_config.variant_name` (keys sorted, e.g. `clip_range=0.1`, `gamma=0.995,lr=0.0003`, `hidden_sizes=32x32`),
+so it can never overwrite a main run. The layout without the variant level was never used for a trained run and is not
+supported (`load_eval_episodes` raises if it finds one). Helpers in `common/paths.py`. `results/` is git-ignored.
 
 ## 10. Fixed before training, not to be changed after seeing results
 
 Reward weights, densities and `BASE_CONFIG` (`common/config.py`); the seed sets; the test conditions and the number of test
-episodes; the metric definitions including the near-miss threshold of 1.5 s; deterministic evaluation of the final
-checkpoint; the aggregation (seed as unit, 95% Student-t interval over seeds); gamma >= 0.99; the same step budget and network
-size for both algorithms; the treatment of time-limit truncation. Any deviation is reported as such.
+episodes; the metric definitions including the near-miss threshold of 1.5 s and the lane-change reversal window of 3 steps;
+`TARGET_PERFORMANCE`; deterministic evaluation of the final checkpoint; the aggregation (seed as unit, 95% Student-t
+interval over seeds); gamma >= 0.99; the same step budget (`TrainBudget`: total steps, validation interval and number of
+validation episodes) and network size for both algorithms; the treatment of time-limit truncation. Any deviation is reported
+as such. The budget, the hyperparameters and `TARGET_PERFORMANCE` are still placeholders at the time of writing (list in
+`CLAUDE.md`, "TO DECIDE BEFORE TRAINING") and must be decided before the first training run.
+
+## 11. Training logs, computational cost, variants and videos
+
+Every training run (`common/training.py`, the same for DDQN and PPO) writes, with `env_step` as the x-axis everywhere:
+
+- `train_log.csv`: one row per finished training episode: `env_step` (at episode end), `wall_s`, `vec_env` (index of the
+  vector env, 0 for DDQN) and every per-episode metric of section 5, computed by the same `EpisodeRecorder` as the test
+  episodes (`episode_return` is the training reward, `return_env` the default reward). The leader / TTC part costs one
+  neighbour search per step; it is on in training (measured overhead: `README.md`, Training).
+- `update_log.csv`: one row per `K` gradient-update calls (`update_idx` counts gradient updates, `updates_in_row` is
+  the number of updates in the row): `lr`, `loss`, `grad_norm` (before clipping), `grad_norm_max`, `update_time_s`; DDQN: `td_loss, q_mean, q_max, target_q_mean, epsilon,
+  buffer_size`; PPO: `policy_loss, value_loss, entropy, approx_kl, clip_fraction, explained_variance, n_epochs_done`
+  (early stop on KL). A column of the other algorithm is not allowed; a missing one is NaN. **Aggregation of the K calls
+  of a row** (one rule per column, the same for both algorithms, defined in `UPDATE_AGG`; with K = 1 every rule returns the
+  single value): `max` for `q_max` (overestimation spikes must survive) and `grad_norm_max` (derived by the logger from
+  `grad_norm`: gradient spikes are the usual sign of instability); `sum` for `update_time_s`; `last` for the state variables
+  `lr`, `epsilon`, `buffer_size` (and `env_step`, `update_idx`, `wall_s`); `mean` for every other metric (`loss`,
+  `grad_norm`, `td_loss`, `q_mean`, `target_q_mean`, `policy_loss`, `value_loss`, `entropy`, `approx_kl`, `clip_fraction`,
+  `explained_variance`, `n_epochs_done`).
+- `val_log.csv`: `val_idx`, `env_step`, `wall_s`, `train_wall_s` (wall time without validation), cumulative
+  `cum_env_time_s`, `cum_update_time_s`, `cum_val_time_s`, `cum_checkpoint_time_s`, then the full `summarize_metrics`
+  output and `return_<preset>` for every preset (section 7).
+- `run_meta.json`: algorithm, training reward and density, seed, variant and overridden keys; the full hyperparameters
+  and `TrainBudget`; the fully resolved env config actually used (`env.unwrapped.config`), env id, reward weights, the
+  action index mapping (checked against `common.actions.ACTION_INDEX`, the run fails loudly if highway-env changes it),
+  observation shape, `NEAR_MISS_TTC`, `REVERSAL_WINDOW`; git commit and dirty flag, library versions, OS, CPU model, logical
+  cores, thread settings, device, `--workers`; timestamps, wall time and its split into env / update / validation /
+  checkpoint seconds, training steps/s without validation, the quiet benchmark steps/s measured before training, final env
+  step, episodes, updates, status (`running` / `finished` / `failed`, also on a crash or Ctrl-C), the number of trainable
+  parameters and the inference time.
+
+**Inference time** (`common.benchmark.measure_inference`): milliseconds per `agent.act(obs, deterministic=True)` at batch
+size 1, CPU, one thread, on observations visited by the final agent on the first five `VAL_SEEDS` episodes; 100 untimed
+warm-up calls, then 1,000 timed calls; median and 90th percentile are stored (also mean). Measured once at the end of
+training and only meaningful in a quiet process: other running jobs inflate it (CLAUDE.md rule 1, C8), so for runs trained
+in parallel the cost comparison repeats the benchmark on the saved checkpoints in a quiet process.
+
+**Computational cost** is reported as (a) env steps to `TARGET_PERFORMANCE` (section 7), (b) the update cost per env step
+(the `update_time_s` / `env_time_s` split, which does not depend on the speed of the simulator), (c) the inference time and
+(d) the parameter count. Raw wall time of runs that ran in parallel is not compared across algorithms.
+
+**Resume and determinism.** `resume.pt` holds the trainer state, the simulator state of every env (the running episode
+included), the RNG states, the timers and the logger position; rows logged beyond the checkpoint `env_step` are dropped.
+A resumed run therefore reproduces the uninterrupted run row by row (tested, up to wall-clock columns). `--workers` only
+chooses between an in-process and a subprocess vector env (PPO) and the validation pool: the logs are identical (tested).
+
+**Failure cases and videos.** `common.failure_cases` lists the episode seeds of a test CSV by outcome (`crashed`, `near_miss`,
+`completed`), sorted by return (worst first for failures); `scripts/record_video.py --from-eval-csv <csv> --outcome crashed
+--n 3` renders them (`env.reset(seed=seed)` reproduces the measured episode). The qualitative analysis shows crash seeds of
+the final checkpoint and of an early milestone checkpoint (`milestone_<p>pct.pt`, `TrainBudget.milestone_fractions`) of the
+same run. `scripts/record_video.py` is the only script that renders.
 
 ## References
 

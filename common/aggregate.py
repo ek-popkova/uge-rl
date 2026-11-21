@@ -1,9 +1,10 @@
 """Two-level aggregation of test results (see ``docs/evaluation_protocol.md``).
 
-Level 1, per model: one model = (algorithm, train reward, training seed); its metrics under one
-condition are the mean over its test episodes (100 on ``TEST_SEEDS``). ``per_model_table``.
+Level 1, per model: one model = (algorithm, train reward, variant, training seed); its metrics under
+one condition are the mean over its test episodes (100 on ``TEST_SEEDS``). ``per_model_table``.
+``variant`` is "main" for the main grid and the sensitivity-run name otherwise (``common.paths``).
 
-Level 2, per (algorithm, train reward, condition): mean over the training seeds with a two-sided
+Level 2, per (algorithm, train reward, variant, condition): mean over the training seeds with a two-sided
 95% Student-t confidence interval over seeds, mean +/- t(0.975, n-1) * sd / sqrt(n) with n the
 number of seeds (sd with n-1 in the denominator). A bootstrap over a handful of values
 underestimates the uncertainty (it cannot leave the observed range); the t-interval is the
@@ -16,19 +17,28 @@ Returns are only comparable within one reward preset: ``episode_return`` and ``r
 live on different scales (a crash costs 15, 20 or 30). Compare reward presets by behavioural
 metrics (crash rate, completion rate, mean speed, lane changes, near-miss rate, crashes per km).
 The level-1 column ``return_own`` is the return under the preset the model was trained with.
+
+Training curves (``val_log.csv``, one file per run): ``steps_to_threshold`` (env steps and training
+wall time until every condition of the joint ``TARGET_PERFORMANCE`` first holds), ``learning_curve_table``
+(mean and 95% t-interval over seeds per validation point) and ``curve_auc`` /
+``auc_across_seeds`` (area under the learning curve). Points are aligned across seeds by validation
+index, not by env step (PPO's validation steps differ slightly between runs).
 """
 
 from __future__ import annotations
 
 import math
+from typing import Any, Mapping, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
+from common.config import TARGET_PERFORMANCE
 from common.metrics import add_return_columns, summarize_metrics
+from common.paths import MAIN_VARIANT
 
-MODEL_KEYS = ["algorithm", "train_reward", "train_seed", "condition"]
-GROUP_KEYS = ["algorithm", "train_reward", "condition"]
+MODEL_KEYS = ["algorithm", "train_reward", "variant", "train_seed", "condition"]
+GROUP_KEYS = ["algorithm", "train_reward", "variant", "condition"]
 
 # Two-sided 95% Student-t quantiles t(0.975, df) for df = 1..30 (checked against the t distribution).
 _T_975 = (
@@ -44,8 +54,11 @@ def per_model_table(episodes: pd.DataFrame) -> pd.DataFrame:
     """Level 1: one row per (algorithm, train_reward, train_seed, condition).
 
     ``episodes`` is the concatenation of the per-episode CSVs with the columns ``algorithm``,
-    ``train_reward``, ``train_seed`` and ``condition`` added (``common.paths.load_eval_episodes``).
+    ``train_reward``, ``variant``, ``train_seed`` and ``condition`` added
+    (``common.paths.load_eval_episodes``); a missing ``variant`` column is read as "main".
     """
+    if "variant" not in episodes:
+        episodes = episodes.assign(variant=MAIN_VARIANT)
     missing = [c for c in MODEL_KEYS if c not in episodes]
     if missing:
         raise ValueError(f"episodes lack the columns {missing}")
@@ -98,9 +111,9 @@ def t_interval(values: np.ndarray) -> tuple[float, float]:
 
 
 def across_seeds_table(per_model: pd.DataFrame) -> pd.DataFrame:
-    """Level 2: mean over training seeds and 95% t-interval per (algorithm, train_reward, condition).
+    """Level 2: mean over training seeds and 95% t-interval per (algorithm, train_reward, variant, condition).
 
-    Returns a long table with the columns ``algorithm, train_reward, condition, metric, mean,
+    Returns a long table with the columns ``algorithm, train_reward, variant, condition, metric, mean,
     ci_low, ci_high, n_seeds``. The per-seed values are the rows of ``per_model`` (level 1), kept
     for plotting individual runs.
     """
@@ -128,3 +141,148 @@ def aggregate(episodes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Both levels at once: ``(per_model, across_seeds)``; ``per_model`` holds the per-seed values."""
     per_model = per_model_table(episodes)
     return per_model, across_seeds_table(per_model)
+
+
+# ---------------------------------------------------------------------------------------------
+# Training curves (val_log.csv)
+# ---------------------------------------------------------------------------------------------
+_OPERATORS = {
+    "<=": lambda a, b: a <= b,
+    ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b,
+    ">": lambda a, b: a > b,
+}
+_CURVE_COLUMNS = ["val_idx", "env_step_mean", "env_step_min", "env_step_max", "mean", "ci_low", "ci_high", "n_seeds"]
+
+
+def steps_to_threshold(
+    val_log: pd.DataFrame,
+    threshold: Union[Mapping[str, Any], Sequence[Mapping[str, Any]]] = TARGET_PERFORMANCE,
+    consecutive: int = 1,
+) -> dict[str, float]:
+    """First validation point at which EVERY condition of the target holds (default ``TARGET_PERFORMANCE``).
+
+    Args:
+        val_log: ``val_log.csv`` of one run (columns ``env_step``, ``train_wall_s`` and the metrics).
+        threshold: list of ``{"metric": ..., "operator": "<=" | ">=" | "<" | ">", "value": ...}`` conditions that
+            must all hold at the same point (a joint safety + efficiency target; a single condition dict is
+            accepted too and means a list of one). The metric names are checked against the summary columns only
+            for ``TARGET_PERFORMANCE`` (at import); here an unknown column raises ``ValueError``.
+        consecutive: Number of validation points in a row at which all conditions must hold; the
+            reported point is the first of them. 1 (default) is the plain first crossing; with only 20
+            validation episodes per point a single crossing can be luck.
+
+    Returns:
+        ``{"env_step", "train_wall_s", "val_idx"}`` of that point; all NaN if the target is never met.
+        ``train_wall_s`` is the training wall time WITHOUT validation time (computational cost).
+    """
+    conditions = [threshold] if isinstance(threshold, Mapping) else list(threshold)
+    if not conditions:
+        raise ValueError("threshold has no conditions")
+    if consecutive < 1:
+        raise ValueError("consecutive must be >= 1")
+    ok = np.ones(len(val_log), dtype=bool)
+    for cond in conditions:
+        metric, op, value = cond["metric"], cond["operator"], float(cond["value"])
+        if op not in _OPERATORS:
+            raise ValueError(f"operator must be one of {list(_OPERATORS)}, got {op!r}")
+        if metric not in val_log:
+            raise ValueError(f"val_log has no column {metric!r}")
+        ok &= _OPERATORS[op](val_log[metric].to_numpy(dtype=float), value)  # NaN compares False
+    run = 0
+    for i, hit in enumerate(ok):
+        run = run + 1 if hit else 0
+        if run >= consecutive:
+            first = i - consecutive + 1
+            row = val_log.iloc[first]
+            return {
+                "env_step": float(row["env_step"]),
+                "train_wall_s": float(row["train_wall_s"]) if "train_wall_s" in val_log else math.nan,
+                "val_idx": float(row["val_idx"]) if "val_idx" in val_log else float(first),
+            }
+    return {"env_step": math.nan, "train_wall_s": math.nan, "val_idx": math.nan}
+
+
+def _as_log_list(val_logs: Union[Mapping[Any, pd.DataFrame], Sequence[pd.DataFrame]]) -> list[pd.DataFrame]:
+    return list(val_logs.values()) if isinstance(val_logs, Mapping) else list(val_logs)
+
+
+def learning_curve_table(
+    val_logs: Union[Mapping[Any, pd.DataFrame], Sequence[pd.DataFrame]],
+    metric: str = "episode_return",
+) -> pd.DataFrame:
+    """Mean and 95% t-interval over seeds of ``metric`` at every validation point.
+
+    ``val_logs`` holds one ``val_log.csv`` frame per training seed (``common.paths.load_val_logs``).
+    Points are aligned by validation index (``val_idx`` if present, else the row order): the k-th
+    validation of every seed is one point, even if the actual env steps differ slightly (PPO validates
+    at the first update boundary after each multiple of the interval). Returns one row per point with
+    ``val_idx, env_step_mean, env_step_min, env_step_max, mean, ci_low, ci_high, n_seeds``; a seed
+    with fewer points (unfinished run) contributes to fewer rows.
+    """
+    frames = []
+    for df in _as_log_list(val_logs):
+        if metric not in df:
+            raise ValueError(f"val_log has no column {metric!r}")
+        idx = df["val_idx"].to_numpy() if "val_idx" in df else np.arange(len(df))
+        frames.append(
+            pd.DataFrame(
+                {"val_idx": idx, "env_step": df["env_step"].to_numpy(), "value": df[metric].to_numpy(dtype=float)}
+            )
+        )
+    if not frames:
+        return pd.DataFrame(columns=_CURVE_COLUMNS)
+    rows = []
+    for idx, g in pd.concat(frames, ignore_index=True).groupby("val_idx", sort=True):
+        vals = g["value"].to_numpy(dtype=float)
+        lo, hi = t_interval(vals)
+        valid = ~np.isnan(vals)
+        rows.append(
+            {
+                "val_idx": int(idx),
+                "env_step_mean": float(g["env_step"].mean()),
+                "env_step_min": float(g["env_step"].min()),
+                "env_step_max": float(g["env_step"].max()),
+                "mean": float(vals[valid].mean()) if valid.any() else math.nan,
+                "ci_low": lo,
+                "ci_high": hi,
+                "n_seeds": int(valid.sum()),
+            }
+        )
+    return pd.DataFrame(rows, columns=_CURVE_COLUMNS)
+
+
+def curve_auc(val_log: pd.DataFrame, metric: str = "episode_return", normalize: bool = True) -> float:
+    """Area under the learning curve of one run: trapezoid rule over ``env_step``.
+
+    The curve starts at the first validation point (no extrapolation back to step 0). With
+    ``normalize=True`` (default) the area is divided by the step span, i.e. it is the average value
+    of the metric over training, in the units of the metric. NaN with fewer than two points.
+    """
+    if metric not in val_log:
+        raise ValueError(f"val_log has no column {metric!r}")
+    x = val_log["env_step"].to_numpy(dtype=float)
+    y = val_log[metric].to_numpy(dtype=float)
+    keep = ~np.isnan(y)
+    x, y = x[keep], y[keep]
+    if len(x) < 2 or x[-1] <= x[0]:
+        return math.nan
+    area = float(np.sum((y[1:] + y[:-1]) / 2.0 * np.diff(x)))
+    return area / float(x[-1] - x[0]) if normalize else area
+
+
+def auc_across_seeds(
+    val_logs: Union[Mapping[Any, pd.DataFrame], Sequence[pd.DataFrame]],
+    metric: str = "episode_return",
+    normalize: bool = True,
+) -> dict[str, float]:
+    """Per-seed area under the learning curve, then mean and 95% t-interval over seeds."""
+    aucs = np.array([curve_auc(df, metric, normalize) for df in _as_log_list(val_logs)], dtype=float)
+    lo, hi = t_interval(aucs)
+    valid = ~np.isnan(aucs)
+    return {
+        "mean": float(aucs[valid].mean()) if valid.any() else math.nan,
+        "ci_low": lo,
+        "ci_high": hi,
+        "n_seeds": int(valid.sum()),
+    }

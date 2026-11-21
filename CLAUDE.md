@@ -37,8 +37,11 @@ for all experiment code (DDQN/PPO training, evaluation, sweeps):
    plateaus at ~8 workers here and drops at 12-16 (C5). Measure the scaling once on a
    new machine. Split work into fine-grained tasks (config x policy x seed chunk),
    heaviest first, and use `imap_unordered`, so no worker idles at the end (C5b).
-6. **PPO: use `gymnasium.vector.AsyncVectorEnv`** for rollout collection (n envs = workers,
-   each env created once). DDQN: one env per run, parallelize across runs, not inside one.
+6. **PPO: vectorized envs for rollout collection, each env created once.** `n_envs` is a
+   hyperparameter (`PPOConfig.n_envs`), not the worker count; `common.train_env.make_vector_env`
+   runs the envs in this process for `--workers 1` and in `AsyncVectorEnv` subprocesses for
+   `--workers > 1` (identical data, tested). DDQN: one env per run, parallelize across runs, not
+   inside one.
 7. **Limit threads per worker.** Set `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`,
    `OPENBLAS_NUM_THREADS=1` before importing numpy/torch in every worker, and call
    `torch.set_num_threads(1)` in each worker. (No effect was measured for the
@@ -90,3 +93,115 @@ The scripts in `scripts/pilot/` were left unfixed on purpose because that run ha
 - `common/config.py` (C2): **resolved** in the final configuration commit. The former placeholders
   (`simulation_frequency=15`, 50/80-vehicle presets, 5.0 and 2.4 steps/s) were replaced by the pilot-based values
   (`simulation_frequency=5`, 20 vehicles; see `docs/config_decisions.md`).
+
+## Experiment tracking
+
+Infrastructure for DDQN and PPO is in place and the algorithms are still stubs. A training run is
+`common.training.TrainingRun` + an algorithm `Trainer` (`ddqn/train.py`, `ppo/train.py`); the harness
+writes every number needed for the report, identically for both algorithms. Details: `README.md`
+(Training), `docs/evaluation_protocol.md` (sections 5, 7, 9, 11).
+
+Rules:
+
+- **One path for all training runs.** Every training script uses `common.training.TrainingRun` and
+  `common.train_logging`. No ad-hoc CSVs, prints or metric formulas. Metrics are computed only in
+  `common/metrics.py` (the same `EpisodeRecorder` runs in evaluation and, through
+  `common.train_env.TrainEnvWrapper`, in training). The x-axis is always `env_step` (transitions summed
+  over vector envs), never episodes or updates.
+- **Schemas live in one place.** `common/train_logging.py` defines `train_log.csv`, `update_log.csv` and
+  `val_log.csv`; `common/metrics.py` defines the episode columns. Adding a column means updating the
+  schema, `tests/test_training.py` / `tests/test_metrics.py` and `docs/evaluation_protocol.md`.
+- **Fixed before training, never changed after seeing results:** `TARGET_PERFORMANCE`, `REVERSAL_WINDOW`,
+  `NEAR_MISS_TTC`, the budgets (`TrainBudget`), the validation interval and number of validation
+  episodes, the seed sets and test conditions. Any deviation is reported as such.
+- **Benchmarks only in a quiet process.** `common.benchmark.measure_env_speed` and `measure_inference`
+  run when nothing else is running (rule 1, C8). Wall times of runs that ran in parallel are comparable only
+  between runs that ran under the same load; compare `update_time_s` per env step and env steps to the target
+  rather than raw wall time.
+- **Variants.** Sensitivity runs use `--set key=value` (recorded in `run_meta.json`) and go to
+  `runs/<algo>/<reward>/<variant>/seed<s>`; the main grid is `main`. Never write a sensitivity run into `main`.
+
+### TO DECIDE BEFORE TRAINING
+
+Everything below is a PLACEHOLDER (`# PLACEHOLDER: decide before training`): a conventional value that only
+keeps the code runnable, not a tuned one. The harness prints `placeholders_in_use` at start and stores it
+in `run_meta.json`. Replace `_ph(...)` by a plain default in `common/train_config.py` once decided.
+
+| Item | Where | What it affects |
+|---|---|---|
+| `total_env_steps` (100,000) | `TrainBudget` | training length of every model; same for both algorithms; must be a multiple of the PPO rollout size |
+| `val_every_env_steps` (5,000), `val_n_episodes` (20 = all `VAL_SEEDS`) | `TrainBudget` | resolution and noise of the learning curves; validation cost |
+| `checkpoint_every_env_steps` (10,000), `milestone_fractions` (0.1, 0.5) | `TrainBudget` | resume granularity (at most this much work lost); which early checkpoints exist for "early vs late" videos |
+| `TARGET_PERFORMANCE` (`crash_rate <= 0.2` AND `mean_speed >= 25.5`) | `common/config.py` | the "env steps to reach a target" metric (computational cost comparison). Joint on purpose: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone would be met without learning; the speed bound lies above `idle` (24.7 m/s). It must stay unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit |
+| DDQN: `lr, gamma, buffer_size, batch_size, learning_starts, train_freq, gradient_steps, target_update_interval, tau, eps_start, eps_end, eps_decay_steps, max_grad_norm, hidden_sizes` | `DDQNConfig` | final performance and stability; `gamma >= MIN_GAMMA` is enforced |
+| PPO: `lr, gamma, gae_lambda, clip_range, n_envs, n_steps, n_epochs, minibatch_size, ent_coef, vf_coef, max_grad_norm, target_kl, hidden_sizes` | `PPOConfig` | same; `n_envs * n_steps` is the rollout size and the step granularity |
+| `hidden_sizes` must be equal for both (`check_comparable`) | both configs | fair comparison (network size) |
+| Sensitivity grid per algorithm (not defined yet): lr, gamma, DDQN epsilon schedule (`eps_decay_steps`, `eps_end`), PPO `clip_range` | `--set` runs, 3 seeds each | assignment point 7; each setting costs `3 x (T + validation)` steps |
+| `update_log_every` K (DDQN 100, PPO 1) | CLI default (`common.training.DEFAULT_UPDATE_LOG_EVERY`) | size of `update_log.csv` only |
+
+Runtime implication. Aggregate throughput here is about 140 env steps/s with 8-12 processes (80-180 depending on
+the session, `docs/performance_analysis.md` C5, C8), so every 1 M simulated steps cost about 2 h. One
+model costs `T + n_val x val_n_episodes x 30` simulated steps, with `n_val = T / val_every` (`TrainBudget.n_val_points`).
+With the placeholders (T = 100,000, 20 validations x 20 episodes x 30 steps = 12,000 steps) that is 112,000
+steps; the 40 main-grid models are 4.5 M steps, about 9 h at 140 steps/s (13 h at 92). The sensitivity runs come
+on top: e.g. 4 hyperparameters x 2 non-default values x 3 seeds = 24 runs per algorithm, 2.7 M steps each,
+about 11 h for both. Network updates and the `EpisodeRecorder` overhead (measured: see `README.md`, Training)
+are not included. `TrainingRun` prints its own simulation-only estimate from a quiet benchmark before
+starting and refuses above `--max-minutes` (default 45) without `--force`.
+
+### Not expressible in code yet (checklist for the report)
+
+- [ ] Qualitative behaviour (lane changes, overtaking, speed adaptation, failure cases): record videos of
+  crash seeds (`python -m scripts.record_video --from-eval-csv ... --outcome crashed --n 3`) from the final checkpoint
+  AND from an early milestone checkpoint of the same run. Needs trained agents and the `load_agent` TODO in
+  `scripts/record_video.py`. `overtakes` counts vehicles passed, not manoeuvres: confirm on video.
+- [ ] Evaluation driver for trained agents (the analogue of `scripts/eval_baselines.py`: `evaluate()` for the five
+  conditions on `TEST_SEEDS`, `save_eval`, with `variant`); not written because no agent can be loaded yet.
+- [ ] "Does a higher return mean better driving?": needs trained models. Compare the ranking by `return_<preset>`
+  with the behavioural metrics (crash rate, completion, mean speed, near-miss, lane changes) across the four reward presets.
+- [ ] Hyperparameter sensitivity: choose the grid (table above), run 3 seeds per setting, report separately from the main grid.
+- [ ] Cost comparison: run the quiet benchmarks (`quiet_benchmark_steps_per_s`, `inference` in `run_meta.json`) in a quiet process;
+  runs trained in parallel have disturbed wall times (C8).
+- [ ] Critical discussion (limitations: 5 Hz fast simulator, one training density, 5 seeds, placeholder-derived hyperparameters).
+
+## Tests: why they exist and when to run them
+
+Why:
+
+- The project is a controlled comparison of DDQN and PPO. The costly failure is not a crash but a silent change
+  that corrupts numbers and is only found after hours of training, or never.
+- What each group protects:
+  - **Config and seed invariants** (`test_config.py`, seed and layout tests): disjoint seed sets, env config equal to
+    the documented one, action indices. Results stay comparable with the baselines and the docs.
+  - **Reward and metric formulas on hand-built cases** (`test_rewards.py`, `test_metrics.py`, `test_evaluate.py`): TTC,
+    lane changes, reversals, overtakes, return recomputation under every preset. The report rests on these.
+  - **Determinism** (`test_evaluate.py`, `test_training.py`): results independent of `--workers`, episode order and
+    fresh vs reused env. Seeds stay reproducible.
+  - **Training harness via `RandomTrainer`** (`test_training.py`): files and schemas, resume equals an uninterrupted run,
+    monotonic `env_step`. DDQN and PPO are written by different people against the same harness; these tests catch
+    either implementation breaking it.
+  - **`TARGET_PERFORMANCE` unreachable for scripted baselines**: the steps-to-target metric stays meaningful.
+
+When:
+
+- **Fast tier** (`python -m pytest -m "not slow"`): during development, after any change. Pure-function and
+  fake-env tests only; no real environment is created.
+- **Full suite** (`python -m pytest`): before every commit or merge that touches `common/`, after pulling a teammate's
+  changes, after changing package versions, and always before launching the main 40-model grid.
+- **Never while training runs or timing benchmarks are running**: the tests load the CPU and distort steps/s and wall
+  times in `run_meta.json` (C8).
+- A test that creates a real highway-env environment or runs episodes must carry `@pytest.mark.slow`.
+
+Still to add when the algorithms are implemented (each needs the real `DDQNTrainer` / `PPOTrainer`):
+
+- [ ] Both trainers run end to end through `TrainingRun` for a few hundred steps and satisfy the same file / schema / resume /
+  `--workers` tests as `RandomTrainer` (parametrize the existing harness tests over the trainer class).
+- [ ] DDQN: the target uses the online network's argmax and the target network's value (Double DQN), the target network updates
+  on schedule, only `terminated` (not `truncated`) zeroes the bootstrap, epsilon follows its schedule, a hand-built batch gives the
+  expected TD loss.
+- [ ] PPO: GAE on a hand-built rollout (including bootstrap from `final_obs` at truncation and none at a crash), the clipped
+  objective on hand-built ratios, `approx_kl` / `clip_fraction` definitions, early stop on `target_kl`.
+- [ ] Both: `make_eval_agent()` is picklable and light, `act(obs, deterministic=True)` is deterministic, `save` / `load` round-trips,
+  parameter count equals `n_parameters()`, `hidden_sizes` equal for both algorithms (`check_comparable`), and the whole run
+  is reproducible for a fixed seed.
+- [ ] `load_agent` in `scripts/record_video.py` loads both agents from `final.pt` and a milestone checkpoint.
