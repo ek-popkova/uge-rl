@@ -95,11 +95,24 @@ preset: `main` (training condition), `low` / `high` (other densities), `long` (6
 to 30 s in the pilot), `precise` (`highway-v0`, `simulation_frequency=15`, collisions between other vehicles checked). Rationale
 and metrics: `docs/evaluation_protocol.md`.
 
-## TARGET_PERFORMANCE (placeholder)
+## TARGET_PERFORMANCE and TARGET_CONSECUTIVE (placeholders)
 
-| Parameter | Value | Status | Meaning |
-|---|---|---|---|
-| `TARGET_PERFORMANCE` | `[crash_rate <= 0.2, mean_speed >= 25.5]` (all must hold) | **placeholder, decide before training** | the validation point at which a run counts as having reached the target (`common.aggregate.steps_to_threshold`, "env steps to target performance" in the cost comparison); behavioural metrics, so it is comparable across reward presets. It is joint on purpose and must stay unreachable for the scripted baselines: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone would reward braking; `idle` crashes in 71% of the episodes at 24.7 m/s (`docs/evaluation_protocol.md` section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.2, idle 0.60 / 24.8, slower 0.00 / 20.0, faster 1.00 / 28.9 m/s (guarded by a test). Fixed before any training run and not changed after seeing results (`docs/evaluation_protocol.md` sections 7 and 10). The budget and the hyperparameters (`common/train_config.py`) are placeholders too. |
+Used by `common.aggregate.steps_to_threshold` for "env steps to target performance" in the cost comparison. Behavioural
+metrics only, so the levels are comparable across reward presets. Two **pre-registered, named levels**, both reported for
+every run, fixed before any training run and not changed after seeing results (`docs/evaluation_protocol.md` sections 7
+and 10); all values below are **placeholders, decide before training**.
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `TARGET_PERFORMANCE["beats_idle"]` | `crash_rate < 0.6` and `mean_speed > 24.8` | strictly better than `idle` on both metrics on `VAL_SEEDS` (idle: 0.60 and 24.76 m/s): the agent has learned something over the default policy |
+| `TARGET_PERFORMANCE["strong"]` | `crash_rate <= 0.2` and `mean_speed >= 25.5` | driving fast and safely; may turn out unreachable, in which case `beats_idle` still allows a comparison |
+| `TARGET_CONSECUTIVE` | 2 | a level is reached at the first of this many consecutive validation points at which all its conditions hold (20 validation episodes: crash rate moves in steps of 0.05, one lucky point must not count) |
+
+Each level is joint and must stay unreachable for the scripted baselines: `slower` has a 0% crash rate at 20 m/s, so a
+crash bound alone would reward braking; `idle` crashes in 71% of the episodes at 24.7 m/s (`docs/evaluation_protocol.md`
+section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.2, idle 0.60 / 24.8, slower 0.00 / 20.0,
+faster 1.00 / 28.9 m/s; `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` checks both levels. The
+budget and the hyperparameters (`common/train_config.py`) are placeholders too.
 
 ## Limitations
 

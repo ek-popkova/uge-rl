@@ -13,7 +13,7 @@ from common.actions import ACTION_INDEX
 from common.aggregate import auc_across_seeds, curve_auc, learning_curve_table, steps_to_threshold
 from common.baselines import BASELINE_NAMES, make_baseline
 from common.benchmark import measure_inference, record_val_observations
-from common.config import MIN_GAMMA, REWARDS, TARGET_PERFORMANCE, VAL_SEEDS
+from common.config import MIN_GAMMA, REWARDS, TARGET_CONSECUTIVE, TARGET_PERFORMANCE, VAL_SEEDS
 from common.failure_cases import list_episodes_by_outcome, seeds_by_outcome
 from common.metrics import EPISODE_COLUMNS, NEAR_MISS_TTC, REVERSAL_WINDOW, SUMMARY_COLUMNS, check_target_performance
 from common.evaluate import validate
@@ -314,26 +314,34 @@ def test_placeholders_are_listed_and_overrides_are_not():
     assert "DDQNConfig.lr" in names and "TrainBudget.total_env_steps" in names
     assert "DDQNConfig.device" not in names  # decided by CLAUDE.md rule 8
     assert "DDQNConfig.lr" not in placeholders_in_use(DDQNConfig(), overridden=["lr"])
-    assert isinstance(TARGET_PERFORMANCE, list) and len(TARGET_PERFORMANCE) >= 2  # joint target
-    check_target_performance(TARGET_PERFORMANCE)  # also run at import of common.metrics
+    assert set(TARGET_PERFORMANCE) == {"beats_idle", "strong"}  # two pre-registered levels
+    assert all(len(conds) >= 2 for conds in TARGET_PERFORMANCE.values())  # joint: safety and efficiency
+    assert isinstance(TARGET_CONSECUTIVE, int) and TARGET_CONSECUTIVE >= 2  # one lucky point must not count
+    check_target_performance(TARGET_PERFORMANCE, TARGET_CONSECUTIVE)  # also run at import of common.metrics
 
 
 def test_target_performance_structure_is_validated():
-    good = [{"metric": "crash_rate", "operator": "<=", "value": 0.2}, {"metric": "mean_speed", "operator": ">=", "value": 25.5}]
-    check_target_performance(good)
+    safe = {"metric": "crash_rate", "operator": "<=", "value": 0.2}
+    fast = {"metric": "mean_speed", "operator": ">=", "value": 25.5}
+    check_target_performance({"a": [safe, fast], "b": [fast, {**safe, "operator": "<"}]}, 2)
     cases = {
-        "unknown metric": [{**good[0], "metric": "crash_rte"}, good[1]],
-        "unknown operator": [{**good[0], "operator": "=="}, good[1]],
-        "no efficiency metric": [good[0]],
-        "no safety metric": [good[1]],
-        "not a list": good[0],
-        "empty": [],
-        "string value": [{**good[0], "value": "0.2"}, good[1]],
-        "extra key": [{**good[0], "note": "x"}, good[1]],
+        "unknown metric": {"a": [{**safe, "metric": "crash_rte"}, fast]},
+        "unknown operator": {"a": [{**safe, "operator": "=="}, fast]},
+        "no efficiency metric": {"a": [safe]},
+        "no safety metric": {"a": [fast]},
+        "one level lacks a kind": {"a": [safe, fast], "b": [fast]},
+        "a bare list (old format)": [safe, fast],
+        "empty": {},
+        "empty level": {"a": []},
+        "string value": {"a": [{**safe, "value": "0.2"}, fast]},
+        "extra key": {"a": [{**safe, "note": "x"}, fast]},
     }
     for name, bad in cases.items():
         with pytest.raises(ValueError):
             check_target_performance(bad)
+    for bad_k in (0, -1, 1.5, True, "2"):
+        with pytest.raises(ValueError):
+            check_target_performance({"a": [safe, fast]}, bad_k)
 
 
 # ---- logger -------------------------------------------------------------------------------------------------------------
@@ -494,19 +502,21 @@ def _val_frame(**cols):
 def test_steps_to_threshold_single_condition_and_operators():
     log = _val_log([0.9, 0.5, 0.2, 0.3, 0.1])
     thr = {"metric": "crash_rate", "operator": "<=", "value": 0.2}  # a single condition dict still works
-    assert steps_to_threshold(log, thr) == {"env_step": 3000.0, "train_wall_s": 300.0, "val_idx": 2.0}
-    assert steps_to_threshold(log, [thr]) == steps_to_threshold(log, thr)
-    assert steps_to_threshold(log, {**thr, "operator": "<"})["env_step"] == 5000.0
+    assert steps_to_threshold(log, thr, consecutive=1) == {"env_step": 3000.0, "train_wall_s": 300.0, "val_idx": 2.0}
+    assert steps_to_threshold(log, [thr], consecutive=1) == steps_to_threshold(log, thr, consecutive=1)
+    assert steps_to_threshold(log, {**thr, "operator": "<"}, consecutive=1)["env_step"] == 5000.0
     assert math.isnan(steps_to_threshold(log, thr, consecutive=2)["env_step"])  # never two in a row at <= 0.2
-    never = steps_to_threshold(_val_log([0.9, 0.8]), thr)
+    never = steps_to_threshold(_val_log([0.9, 0.8]), thr, consecutive=1)
     assert all(math.isnan(v) for v in never.values())
-    up = steps_to_threshold(_val_log([1.0, 5.0, 9.0], metric="episode_return"), {"metric": "episode_return", "operator": ">=", "value": 5.0})
-    assert up["env_step"] == 2000.0
-    assert steps_to_threshold(_val_log([float("nan"), 0.1]), thr)["env_step"] == 2000.0  # NaN never meets the threshold
+    up = {"metric": "episode_return", "operator": ">=", "value": 5.0}
+    assert steps_to_threshold(_val_log([1.0, 5.0, 9.0], metric="episode_return"), up, consecutive=1)["env_step"] == 2000.0
+    assert steps_to_threshold(_val_log([float("nan"), 0.1, 0.1]), thr, consecutive=2)["env_step"] == 2000.0  # NaN never meets it
     with pytest.raises(ValueError):
         steps_to_threshold(log, {**thr, "operator": "=="})
     with pytest.raises(ValueError):
         steps_to_threshold(log, [])
+    with pytest.raises(ValueError):
+        steps_to_threshold(log, thr, consecutive=0)
 
 
 def test_steps_to_threshold_needs_every_condition_at_the_same_point():
@@ -514,25 +524,62 @@ def test_steps_to_threshold_needs_every_condition_at_the_same_point():
     fast = {"metric": "mean_speed", "operator": ">=", "value": 25.5}
     # a braking policy: safe from the start, never fast. A fast but crashing phase comes first.
     log = _val_frame(crash_rate=[0.9, 0.1, 0.1, 0.1, 0.1], mean_speed=[28.0, 20.0, 21.0, 26.0, 27.0])
-    assert steps_to_threshold(log, [safe, fast])["env_step"] == 4000.0  # not 2000 (safe only) nor 1000 (fast only)
-    assert steps_to_threshold(log, safe)["env_step"] == 2000.0  # a single condition would reward braking
+    assert steps_to_threshold(log, [safe, fast], consecutive=1)["env_step"] == 4000.0  # not 2000 (safe only) nor 1000 (fast only)
+    assert steps_to_threshold(log, safe, consecutive=1)["env_step"] == 2000.0  # a single condition would reward braking
     only_slow = _val_frame(crash_rate=[0.0, 0.0, 0.0], mean_speed=[20.0, 20.0, 20.0])
-    assert all(math.isnan(v) for v in steps_to_threshold(only_slow, [safe, fast]).values())
+    assert all(math.isnan(v) for v in steps_to_threshold(only_slow, [safe, fast], consecutive=1).values())
     assert steps_to_threshold(log, [safe, fast], consecutive=2)["env_step"] == 4000.0
     assert math.isnan(steps_to_threshold(log, [safe, fast], consecutive=3)["env_step"])
-    assert steps_to_threshold(log)["env_step"] == 4000.0  # default: TARGET_PERFORMANCE (crash <= 0.2 and speed >= 25.5)
+
+
+def test_an_isolated_passing_point_does_not_count_and_the_first_point_of_the_run_is_reported():
+    assert TARGET_CONSECUTIVE == 2
+    strong = TARGET_PERFORMANCE["strong"]
+    good = dict(crash_rate=0.1, mean_speed=26.0)
+    bad = dict(crash_rate=0.5, mean_speed=24.0)
+    # one lucky validation point (20 episodes: crash_rate moves in steps of 0.05) in the middle of bad ones
+    lucky = pd.DataFrame([bad, bad, good, bad, bad]).assign(
+        env_step=[1000, 2000, 3000, 4000, 5000], train_wall_s=[10, 20, 30, 40, 50], val_idx=range(5))
+    assert all(math.isnan(v) for v in steps_to_threshold(lucky, strong).values())  # default: TARGET_CONSECUTIVE points
+    assert steps_to_threshold(lucky, strong, consecutive=1)["env_step"] == 3000.0  # the single point would have counted
+    # an isolated point followed later by two in a row: the reported point is the FIRST of the qualifying pair
+    run = pd.DataFrame([bad, good, bad, good, good, good]).assign(
+        env_step=[1000, 2000, 3000, 4000, 5000, 6000], train_wall_s=[10, 20, 30, 40, 50, 60], val_idx=range(6))
+    assert steps_to_threshold(run, strong) == {"env_step": 4000.0, "train_wall_s": 40.0, "val_idx": 3.0}
+
+
+def test_steps_to_threshold_reports_both_pre_registered_levels():
+    idle = dict(crash_rate=0.60, mean_speed=24.76)  # idle on VAL_SEEDS: does not beat itself
+    better = dict(crash_rate=0.40, mean_speed=25.0)  # beats idle, not strong
+    strong = dict(crash_rate=0.15, mean_speed=26.0)
+    log = pd.DataFrame([idle, better, better, strong, strong]).assign(
+        env_step=[1000, 2000, 3000, 4000, 5000], train_wall_s=[10, 20, 30, 40, 50], val_idx=range(5))
+    out = steps_to_threshold(log)  # default: TARGET_PERFORMANCE and TARGET_CONSECUTIVE
+    assert set(out) == {"beats_idle", "strong"}
+    assert out["beats_idle"] == {"env_step": 2000.0, "train_wall_s": 20.0, "val_idx": 1.0}
+    assert out["strong"] == {"env_step": 4000.0, "train_wall_s": 40.0, "val_idx": 3.0}
+    # a run that only beats idle: the strong level is NaN, the weak level still gives a number
+    weak = log.iloc[:3]
+    out = steps_to_threshold(weak)
+    assert out["beats_idle"]["env_step"] == 2000.0 and math.isnan(out["strong"]["env_step"])
+    assert math.isnan(steps_to_threshold(log.iloc[:1])["beats_idle"]["env_step"])  # idle itself reaches neither
 
 
 @pytest.mark.slow
 def test_no_scripted_baseline_meets_target_performance():
-    """Guards TARGET_PERFORMANCE against edits: no trivial policy may reach it (VAL_SEEDS only, never TEST_SEEDS)."""
+    """Guards TARGET_PERFORMANCE against edits: no trivial policy may reach EITHER level.
+
+    VAL_SEEDS only, never TEST_SEEDS. One validation point is enough here: ``consecutive=1`` is the weakest test
+    (the default of 2 would pass trivially on a single row).
+    """
     for name in BASELINE_NAMES:
         metrics = validate(make_baseline(name), n=len(VAL_SEEDS))
         val_log = pd.DataFrame([{"env_step": 1000, "train_wall_s": 1.0, "val_idx": 0, **metrics}])
-        reached = steps_to_threshold(val_log, TARGET_PERFORMANCE)["env_step"]
-        assert math.isnan(reached), f"scripted baseline {name!r} meets TARGET_PERFORMANCE: " + ", ".join(
-            f"{c['metric']}={metrics[c['metric']]:.3f}" for c in TARGET_PERFORMANCE
-        )
+        for level, conditions in TARGET_PERFORMANCE.items():
+            reached = steps_to_threshold(val_log, conditions, consecutive=1)["env_step"]
+            assert math.isnan(reached), f"scripted baseline {name!r} meets level {level!r}: " + ", ".join(
+                f"{c['metric']}={metrics[c['metric']]:.3f}" for c in conditions
+            )
 
 
 def test_learning_curve_table_aligns_by_validation_index():

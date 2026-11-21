@@ -9,6 +9,7 @@ See `README.md` for layout and setup.
 - Python: use the project venv (`.venv/Scripts/python.exe` on Windows). Code comments in English.
 - `common/config.py` holds team-agreed placeholders. Do not change its values unless asked.
 - Experiment outputs go to `results/` (git-ignored); do not commit results.
+- A new metric, log column or algorithm component gets a test on a hand-built case in the same change (see "Tests: why they exist and when to run them").
 
 ## Performance rules
 
@@ -111,7 +112,7 @@ Rules:
 - **Schemas live in one place.** `common/train_logging.py` defines `train_log.csv`, `update_log.csv` and
   `val_log.csv`; `common/metrics.py` defines the episode columns. Adding a column means updating the
   schema, `tests/test_training.py` / `tests/test_metrics.py` and `docs/evaluation_protocol.md`.
-- **Fixed before training, never changed after seeing results:** `TARGET_PERFORMANCE`, `REVERSAL_WINDOW`,
+- **Fixed before training, never changed after seeing results:** `TARGET_PERFORMANCE` (both levels), `TARGET_CONSECUTIVE`, `REVERSAL_WINDOW`,
   `NEAR_MISS_TTC`, the budgets (`TrainBudget`), the validation interval and number of validation
   episodes, the seed sets and test conditions. Any deviation is reported as such.
 - **Benchmarks only in a quiet process.** `common.benchmark.measure_env_speed` and `measure_inference`
@@ -132,7 +133,7 @@ in `run_meta.json`. Replace `_ph(...)` by a plain default in `common/train_confi
 | `total_env_steps` (100,000) | `TrainBudget` | training length of every model; same for both algorithms; must be a multiple of the PPO rollout size |
 | `val_every_env_steps` (5,000), `val_n_episodes` (20 = all `VAL_SEEDS`) | `TrainBudget` | resolution and noise of the learning curves; validation cost |
 | `checkpoint_every_env_steps` (10,000), `milestone_fractions` (0.1, 0.5) | `TrainBudget` | resume granularity (at most this much work lost); which early checkpoints exist for "early vs late" videos |
-| `TARGET_PERFORMANCE` (`crash_rate <= 0.2` AND `mean_speed >= 25.5`) | `common/config.py` | the "env steps to reach a target" metric (computational cost comparison). Joint on purpose: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone would be met without learning; the speed bound lies above `idle` (24.7 m/s). It must stay unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit |
+| `TARGET_PERFORMANCE` levels `beats_idle` (`crash_rate < 0.6` AND `mean_speed > 24.8`, idle on `VAL_SEEDS`) and `strong` (`crash_rate <= 0.2` AND `mean_speed >= 25.5`), plus `TARGET_CONSECUTIVE` (2) | `common/config.py` | the "env steps to reach a target" metric (computational cost comparison). Both levels are reported for every run, so an unreachable `strong` does not leave the comparison empty; the target must hold at `TARGET_CONSECUTIVE` validation points in a row (one lucky point of 20 episodes must not count). Joint on purpose: `slower` has a 0% crash rate at 20 m/s, so a crash bound alone is met without learning. Both levels must stay unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit |
 | DDQN: `lr, gamma, buffer_size, batch_size, learning_starts, train_freq, gradient_steps, target_update_interval, tau, eps_start, eps_end, eps_decay_steps, max_grad_norm, hidden_sizes` | `DDQNConfig` | final performance and stability; `gamma >= MIN_GAMMA` is enforced |
 | PPO: `lr, gamma, gae_lambda, clip_range, n_envs, n_steps, n_epochs, minibatch_size, ent_coef, vf_coef, max_grad_norm, target_kl, hidden_sizes` | `PPOConfig` | same; `n_envs * n_steps` is the rollout size and the step granularity |
 | `hidden_sizes` must be equal for both (`check_comparable`) | both configs | fair comparison (network size) |
@@ -180,7 +181,7 @@ Why:
   - **Training harness via `RandomTrainer`** (`test_training.py`): files and schemas, resume equals an uninterrupted run,
     monotonic `env_step`. DDQN and PPO are written by different people against the same harness; these tests catch
     either implementation breaking it.
-  - **`TARGET_PERFORMANCE` unreachable for scripted baselines**: the steps-to-target metric stays meaningful.
+  - **`TARGET_PERFORMANCE` (both levels) unreachable for scripted baselines**: the steps-to-target metric stays meaningful.
 
 When:
 
@@ -194,14 +195,19 @@ When:
 
 Still to add when the algorithms are implemented (each needs the real `DDQNTrainer` / `PPOTrainer`):
 
-- [ ] Both trainers run end to end through `TrainingRun` for a few hundred steps and satisfy the same file / schema / resume /
-  `--workers` tests as `RandomTrainer` (parametrize the existing harness tests over the trainer class).
-- [ ] DDQN: the target uses the online network's argmax and the target network's value (Double DQN), the target network updates
-  on schedule, only `terminated` (not `truncated`) zeroes the bootstrap, epsilon follows its schedule, a hand-built batch gives the
-  expected TD loss.
-- [ ] PPO: GAE on a hand-built rollout (including bootstrap from `final_obs` at truncation and none at a crash), the clipped
-  objective on hand-built ratios, `approx_kl` / `clip_fraction` definitions, early stop on `target_kl`.
-- [ ] Both: `make_eval_agent()` is picklable and light, `act(obs, deterministic=True)` is deterministic, `save` / `load` round-trips,
-  parameter count equals `n_parameters()`, `hidden_sizes` equal for both algorithms (`check_comparable`), and the whole run
+- [ ] Time-limit handling, for DDQN and PPO: bootstrap from `s'` when `truncated`, value 0 only when `terminated`; test both
+  cases on hand-built transitions (`docs/evaluation_protocol.md` section 1).
+- [ ] Double DQN target `r + gamma * Q_target(s', argmax_a Q_online(s', a))` on a hand-computed example, and that it differs from
+  the vanilla DQN max target `r + gamma * max_a Q_target(s', a)`; the target network updates on schedule (`target_update_interval`,
+  `tau`); epsilon follows its schedule; a hand-built batch gives the expected TD loss.
+- [ ] GAE on a short hand-computed trajectory, including a truncation in the middle of the rollout (bootstrap from `final_obs`,
+  the GAE recursion is cut there) and a terminal state (no bootstrap).
+- [ ] PPO clipped objective on a toy case (ratios inside and outside the clip range, both advantage signs), the `approx_kl` /
+  `clip_fraction` definitions, and the KL early stop (`n_epochs_done < n_epochs` when `approx_kl` exceeds `target_kl`).
+- [ ] `save` / `load` round trip gives identical actions for a fixed observation batch; `act(obs, deterministic=True)` is
+  deterministic; parameter count equals `n_parameters()`; `hidden_sizes` equal for both algorithms (`check_comparable`).
+- [ ] The real trainers pass the same harness tests as `RandomTrainer` (files, schemas, resume equals an uninterrupted run,
+  monotonic `env_step`, `--workers 1` equals `--workers 2`: parametrize the existing harness tests over the trainer class), and a run
   is reproducible for a fixed seed.
-- [ ] `load_agent` in `scripts/record_video.py` loads both agents from `final.pt` and a milestone checkpoint.
+- [ ] `make_eval_agent()` returns a light, picklable `Agent` (no replay or rollout buffer) that `validate()` can send to worker
+  processes; `load_agent` in `scripts/record_video.py` loads both agents from `final.pt` and from a milestone checkpoint.

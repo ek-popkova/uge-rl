@@ -67,28 +67,42 @@ REWARDS: dict[str, dict[str, float]] = {
 MIN_GAMMA = 0.99
 
 
-# Target performance for the "env steps to reach a target" metric (common.aggregate.steps_to_threshold):
-# the first validation point (VAL_SEEDS, "main" condition) at which EVERY condition below holds, each a
-# `metric <operator> value` on a column of val_log.csv (common.metrics.SUMMARY_COLUMNS). Behavioural metrics
-# only, so the target is comparable across reward presets (returns are not). Must be fixed before any
-# training run and never changed after seeing results (docs/evaluation_protocol.md section 10).
+# Target performance for the "env steps to reach a target" metric (common.aggregate.steps_to_threshold).
+# Two PRE-REGISTERED, named levels, both fixed before any training run and never changed after seeing results
+# (docs/evaluation_protocol.md section 10). Both are reported for every run, so that if the strong level turns out
+# unreachable (NaN for every model) the weaker one still allows a comparison, without touching a threshold afterwards.
+# A level is a list of conditions that must ALL hold, each a `metric <operator> value` on a column of val_log.csv
+# (common.metrics.SUMMARY_COLUMNS); behavioural metrics only, so the levels are comparable across reward presets.
+# Each level is JOINT (one safety and one efficiency condition) and UNREACHABLE for every scripted baseline,
+# otherwise an agent that merely learns a trivial policy would win "steps to target"
+# (tests/test_training.py::test_no_scripted_baseline_meets_target_performance checks both levels on VAL_SEEDS).
 #
-# The target must be JOINT (one safety and one efficiency condition) and UNREACHABLE for every scripted
-# baseline, otherwise an agent that merely learns a trivial policy would win "steps to target"
-# (tests/test_training.py::test_no_scripted_baseline_meets_target_performance checks it on VAL_SEEDS).
-# Baselines on `main` (TEST_SEEDS, docs/evaluation_protocol.md section 8):
-#   policy   crash rate  mean speed
-#   slower      0%        20.0 m/s   safe but slow: a crash bound alone would be met without learning anything
-#   idle       71%        24.7 m/s   the default cruising policy
-#   random     80%        24.9 m/s
-#   faster     99%        28.8 m/s   fast but crashes
-# Placeholder values: crash rate <= 0.2 is far below idle (71%), mean speed >= 25.5 m/s is above idle (24.7) and
-# far above slower (20.0). Neither alone separates learning from a trivial policy; together they require
-# driving fast AND safely (an agent has to avoid slow traffic ahead by changing lanes, not by braking).
-TARGET_PERFORMANCE: list[dict[str, Any]] = [  # PLACEHOLDER: decide before training
-    {"metric": "crash_rate", "operator": "<=", "value": 0.2},  # safety
-    {"metric": "mean_speed", "operator": ">=", "value": 25.5},  # efficiency [m/s]
-]
+# Baselines on `main` (docs/evaluation_protocol.md section 8, TEST_SEEDS) and on VAL_SEEDS (20 episodes, the data
+# the target is evaluated on; from the slow baseline test):
+#   policy   crash rate (test / val)   mean speed [m/s] (test / val)
+#   slower      0% / 0.00               20.0 / 20.0   safe but slow: a crash bound alone is met without learning
+#   idle       71% / 0.60               24.7 / 24.8   the default cruising policy
+#   random     80% / 0.70               24.9 / 24.2
+#   faster     99% / 1.00               28.8 / 28.9   fast but crashes
+# "beats_idle": strictly better than idle on both metrics on VAL_SEEDS (crash rate below idle's 0.60, mean speed
+#   above idle's 24.8 m/s). The weak level: the agent has learned something over the default policy.
+# "strong": crash rate <= 0.2 (far below idle) and mean speed >= 25.5 m/s (above idle, far above slower): driving fast
+#   AND safely, i.e. avoiding slow traffic ahead by changing lanes, not by braking. May turn out unreachable.
+TARGET_PERFORMANCE: dict[str, list[dict[str, Any]]] = {  # PLACEHOLDER: decide before training
+    "beats_idle": [
+        {"metric": "crash_rate", "operator": "<", "value": 0.6},  # safety: idle 0.60 on VAL_SEEDS
+        {"metric": "mean_speed", "operator": ">", "value": 24.8},  # efficiency [m/s]: idle 24.8 on VAL_SEEDS
+    ],
+    "strong": [
+        {"metric": "crash_rate", "operator": "<=", "value": 0.2},  # safety
+        {"metric": "mean_speed", "operator": ">=", "value": 25.5},  # efficiency [m/s]
+    ],
+}
+
+# A level counts as reached at the FIRST of TARGET_CONSECUTIVE consecutive validation points at which all its
+# conditions hold. Validation uses 20 episodes, so crash_rate moves in steps of 0.05 and a single lucky point
+# must not count. PLACEHOLDER: decide before training; fixed before training like the levels.
+TARGET_CONSECUTIVE = 2  # PLACEHOLDER: decide before training
 
 
 def indifference_point(w_speed: float, w_right: float, w_collision: float, T: int = 30) -> float | None:

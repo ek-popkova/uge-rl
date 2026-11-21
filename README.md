@@ -70,8 +70,8 @@ The shared settings live in `common/config.py` and were chosen from the environm
 
 ```bash
 pip install -r requirements.txt   # includes pytest
-python -m pytest -m "not slow"    # fast tier: 49 tests in 3.4 s (pure functions and fake envs; use during development)
-python -m pytest                  # full suite: 108 tests in 198 s (3 min 17 s)
+python -m pytest -m "not slow"    # fast tier: 51 tests in 3.6 s (pure functions and fake envs; use during development)
+python -m pytest                  # full suite: 110 tests in 255 s (4 min 15 s; 198 s in an earlier quiet run, wall time varies 2-5x here, C8)
 ```
 
 The 59 `slow` tests create a real highway-env environment or run episodes (evaluation determinism, spawned workers, the
@@ -173,7 +173,7 @@ curve_point = validate(agent, n=20, reward="balanced")                 # VAL_SEE
 `common/paths.py` defines where models, logs and test results go (`runs/<algo>/<reward>/<variant>/seed<s>`, variant `main`
 for the main grid); `common/aggregate.py` turns per-episode results into per-model values and means over seeds with 95%
 Student-t intervals, and the validation logs into learning curves (`learning_curve_table`, aligned by validation index),
-areas under the curve and env steps to `TARGET_PERFORMANCE` (`steps_to_threshold`). `common/failure_cases.py` lists episode
+areas under the curve and env steps to the `TARGET_PERFORMANCE` levels (`steps_to_threshold`). `common/failure_cases.py` lists episode
 seeds by outcome (crashed / near miss / completed) from a test CSV; `scripts/record_video.py` renders them:
 
 ```bash

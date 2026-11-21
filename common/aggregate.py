@@ -19,7 +19,7 @@ metrics (crash rate, completion rate, mean speed, lane changes, near-miss rate, 
 The level-1 column ``return_own`` is the return under the preset the model was trained with.
 
 Training curves (``val_log.csv``, one file per run): ``steps_to_threshold`` (env steps and training
-wall time until every condition of the joint ``TARGET_PERFORMANCE`` first holds), ``learning_curve_table``
+wall time until each pre-registered level of ``TARGET_PERFORMANCE`` holds at ``TARGET_CONSECUTIVE`` validation points in a row), ``learning_curve_table``
 (mean and 95% t-interval over seeds per validation point) and ``curve_auc`` /
 ``auc_across_seeds`` (area under the learning curve). Points are aligned across seeds by validation
 index, not by env step (PPO's validation steps differ slightly between runs).
@@ -28,12 +28,12 @@ index, not by env step (PPO's validation steps differ slightly between runs).
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping, Sequence, Union
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
-from common.config import TARGET_PERFORMANCE
+from common.config import TARGET_CONSECUTIVE, TARGET_PERFORMANCE
 from common.metrics import add_return_columns, summarize_metrics
 from common.paths import MAIN_VARIANT
 
@@ -155,32 +155,7 @@ _OPERATORS = {
 _CURVE_COLUMNS = ["val_idx", "env_step_mean", "env_step_min", "env_step_max", "mean", "ci_low", "ci_high", "n_seeds"]
 
 
-def steps_to_threshold(
-    val_log: pd.DataFrame,
-    threshold: Union[Mapping[str, Any], Sequence[Mapping[str, Any]]] = TARGET_PERFORMANCE,
-    consecutive: int = 1,
-) -> dict[str, float]:
-    """First validation point at which EVERY condition of the target holds (default ``TARGET_PERFORMANCE``).
-
-    Args:
-        val_log: ``val_log.csv`` of one run (columns ``env_step``, ``train_wall_s`` and the metrics).
-        threshold: list of ``{"metric": ..., "operator": "<=" | ">=" | "<" | ">", "value": ...}`` conditions that
-            must all hold at the same point (a joint safety + efficiency target; a single condition dict is
-            accepted too and means a list of one). The metric names are checked against the summary columns only
-            for ``TARGET_PERFORMANCE`` (at import); here an unknown column raises ``ValueError``.
-        consecutive: Number of validation points in a row at which all conditions must hold; the
-            reported point is the first of them. 1 (default) is the plain first crossing; with only 20
-            validation episodes per point a single crossing can be luck.
-
-    Returns:
-        ``{"env_step", "train_wall_s", "val_idx"}`` of that point; all NaN if the target is never met.
-        ``train_wall_s`` is the training wall time WITHOUT validation time (computational cost).
-    """
-    conditions = [threshold] if isinstance(threshold, Mapping) else list(threshold)
-    if not conditions:
-        raise ValueError("threshold has no conditions")
-    if consecutive < 1:
-        raise ValueError("consecutive must be >= 1")
+def _first_run_of_holds(val_log: pd.DataFrame, conditions: Sequence[Mapping[str, Any]], consecutive: int) -> dict[str, float]:
     ok = np.ones(len(val_log), dtype=bool)
     for cond in conditions:
         metric, op, value = cond["metric"], cond["operator"], float(cond["value"])
@@ -201,6 +176,41 @@ def steps_to_threshold(
                 "val_idx": float(row["val_idx"]) if "val_idx" in val_log else float(first),
             }
     return {"env_step": math.nan, "train_wall_s": math.nan, "val_idx": math.nan}
+
+
+def steps_to_threshold(
+    val_log: pd.DataFrame,
+    threshold: Union[Mapping[str, Any], Sequence[Mapping[str, Any]]] = TARGET_PERFORMANCE,
+    consecutive: Optional[int] = None,
+) -> dict[str, Any]:
+    """Env steps and training time until the target holds at ``consecutive`` validation points in a row.
+
+    Args:
+        val_log: ``val_log.csv`` of one run (columns ``env_step``, ``train_wall_s`` and the metrics).
+        threshold: by default ``TARGET_PERFORMANCE``, a dict of named levels, each a list of conditions
+            ``{"metric", "operator": "<=" | ">=" | "<" | ">", "value"}`` that must ALL hold at the same
+            validation point; every level is evaluated. A single list of conditions (or one condition dict) is
+            evaluated as one unnamed level.
+        consecutive: Number of validation points IN A ROW at which all conditions must hold (default
+            ``TARGET_CONSECUTIVE``); the reported point is the first of them. Validation uses few episodes, so a
+            single lucky point (``consecutive=1``) must not count as "target reached".
+
+    Returns:
+        For named levels ``{level: {"env_step", "train_wall_s", "val_idx"}}``, otherwise the inner dict alone.
+        The values are those of the FIRST point of the qualifying run; all NaN if the level is never reached.
+        ``train_wall_s`` is the training wall time WITHOUT validation time (computational cost).
+    """
+    consecutive = TARGET_CONSECUTIVE if consecutive is None else consecutive
+    if consecutive < 1:
+        raise ValueError("consecutive must be >= 1")
+    if isinstance(threshold, Mapping) and "metric" not in threshold:  # named levels
+        if not threshold:
+            raise ValueError("threshold has no levels")
+        return {level: _first_run_of_holds(val_log, conds, consecutive) for level, conds in threshold.items()}
+    conditions = [threshold] if isinstance(threshold, Mapping) else list(threshold)
+    if not conditions:
+        raise ValueError("threshold has no conditions")
+    return _first_run_of_holds(val_log, conditions, consecutive)
 
 
 def _as_log_list(val_logs: Union[Mapping[Any, pd.DataFrame], Sequence[pd.DataFrame]]) -> list[pd.DataFrame]:

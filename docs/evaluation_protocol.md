@@ -155,17 +155,22 @@ steps) and the actual `env_step` is stored; a last validation always happens at 
 - **Area under the curve** (`curve_auc`, `auc_across_seeds`): trapezoid rule over `env_step` from the first to the last
   validation point, divided by the step span (so it is the average value of the metric during training, in the units of
   the metric); per seed first, then mean and t-interval over seeds.
-- **Steps to a target** (`steps_to_threshold`, target in `common.config.TARGET_PERFORMANCE`): the `env_step` and the
-  training wall time (without validation time, `train_wall_s`) of the first validation point at which EVERY condition of
-  the target holds; NaN if it is never met. The target is a **joint** list of behavioural conditions (comparable across
-  reward presets), at least one safety and one efficiency condition (`crash_rate <= ...` and `mean_speed >= ...`; validated
-  at import), fixed before training (section 10). It must stay **unreachable for the scripted baselines**: `slower` has a
-  0% crash rate at 20 m/s on `main`, so a crash bound alone would reward an agent that only learns to brake; `idle`
-  crashes in 71% of the episodes at 24.7 m/s; the speed bound must lie above idle and the crash bound far below it.
-  `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` runs the four baselines through
-  `validate()` on `VAL_SEEDS` and fails if one of them meets the target, which guards the values against later edits.
-  With 20 validation episodes a single crossing can be luck, so the function also accepts `consecutive=k` (the first of
-  `k` points in a row at which all conditions hold); the reported default is the plain first crossing.
+- **Steps to a target** (`steps_to_threshold`, targets in `common.config.TARGET_PERFORMANCE`): the `env_step` and the
+  training wall time (without validation time, `train_wall_s`) at which a run reaches a target level. A level is a list
+  of behavioural conditions (comparable across reward presets) that must ALL hold at the same validation point, with
+  at least one safety and one efficiency condition (validated at import). It is reached at the **first of
+  `TARGET_CONSECUTIVE = 2` consecutive validation points** at which all its conditions hold, and that first point's
+  `env_step` and `train_wall_s` are reported; NaN if the level is never reached. Validation uses 20 episodes, so
+  `crash_rate` moves in steps of 0.05 and one lucky point must not count (an isolated passing point does not).
+- **Two pre-registered levels**, both reported for every run and fixed before training (section 10):
+  `beats_idle` (strictly better than idle on both metrics on `VAL_SEEDS`: crash rate below 0.60 and mean speed above
+  24.8 m/s) and `strong` (crash rate <= 0.2 and mean speed >= 25.5 m/s). If `strong` turns out unreachable (NaN for every
+  model), `beats_idle` still allows a comparison, and no threshold is changed after seeing results.
+- **The levels are joint and must stay unreachable for the scripted baselines.** `slower` has a 0% crash rate at 20 m/s
+  on `main`, so a crash bound alone would reward an agent that only learns to brake; `idle` crashes in 71% of the
+  episodes at 24.7 m/s on `main` (VAL_SEEDS: 0.60 and 24.8 m/s). `tests/test_training.py::test_no_scripted_baseline_meets_target_performance`
+  runs the four baselines through `validate()` on `VAL_SEEDS` and fails if one meets either level, which guards the values
+  against later edits. All values and `TARGET_CONSECUTIVE` are placeholders until the team decides them.
 
 ## 8. Baselines
 
@@ -238,7 +243,7 @@ supported (`load_eval_episodes` raises if it finds one). Helpers in `common/path
 
 Reward weights, densities and `BASE_CONFIG` (`common/config.py`); the seed sets; the test conditions and the number of test
 episodes; the metric definitions including the near-miss threshold of 1.5 s and the lane-change reversal window of 3 steps;
-`TARGET_PERFORMANCE`; deterministic evaluation of the final checkpoint; the aggregation (seed as unit, 95% Student-t
+`TARGET_PERFORMANCE` (both levels) and `TARGET_CONSECUTIVE`; deterministic evaluation of the final checkpoint; the aggregation (seed as unit, 95% Student-t
 interval over seeds); gamma >= 0.99; the same step budget (`TrainBudget`: total steps, validation interval and number of
 validation episodes) and network size for both algorithms; the treatment of time-limit truncation. Any deviation is reported
 as such. The budget, the hyperparameters and `TARGET_PERFORMANCE` are still placeholders at the time of writing (list in
@@ -280,7 +285,7 @@ warm-up calls, then 1,000 timed calls; median and 90th percentile are stored (al
 training and only meaningful in a quiet process: other running jobs inflate it (CLAUDE.md rule 1, C8), so for runs trained
 in parallel the cost comparison repeats the benchmark on the saved checkpoints in a quiet process.
 
-**Computational cost** is reported as (a) env steps to `TARGET_PERFORMANCE` (section 7), (b) the update cost per env step
+**Computational cost** is reported as (a) env steps to the `TARGET_PERFORMANCE` levels (section 7), (b) the update cost per env step
 (the `update_time_s` / `env_time_s` split, which does not depend on the speed of the simulator), (c) the inference time and
 (d) the parameter count. Raw wall time of runs that ran in parallel is not compared across algorithms.
 

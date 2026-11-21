@@ -60,7 +60,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from common.actions import ACTION_NAMES
-from common.config import BASE_CONFIG, REWARDS, TARGET_PERFORMANCE
+from common.config import BASE_CONFIG, REWARDS, TARGET_CONSECUTIVE, TARGET_PERFORMANCE
 
 NEAR_MISS_TTC = 1.5  # [s] near miss = not crashed and min TTC below this
 # A lane change that undoes the previous one within this many steps (= seconds at policy_frequency
@@ -293,22 +293,16 @@ _MEAN_COLUMNS = {
 # Keys of ``summarize_metrics`` without the return_<preset> columns, in output order.
 SUMMARY_COLUMNS = ["n_episodes", *_MEAN_COLUMNS.values(), "crashes_per_km", "overtakes_per_km"]
 
-# Structure of common.config.TARGET_PERFORMANCE (checked at import, below).
+# Structure of common.config.TARGET_PERFORMANCE (named levels) and TARGET_CONSECUTIVE (checked at import, below).
 TARGET_OPERATORS = ("<=", ">=", "<", ">")
 TARGET_SAFETY_METRICS = ("crash_rate", "completion_rate", "near_miss_rate", "crashes_per_km")
 TARGET_EFFICIENCY_METRICS = ("mean_speed", "distance_m", "overtakes_per_km")
 
 
-def check_target_performance(target: Any) -> None:
-    """Validate a target: a list of ``{"metric", "operator", "value"}`` conditions that must all hold.
-
-    Raises ``ValueError`` for unknown metric names (not in ``SUMMARY_COLUMNS``), unknown operators,
-    non-numeric values, and a target without at least one safety and one efficiency condition (a single
-    kind could be met by a trivial policy: braking for safety, ignoring traffic for speed).
-    """
-    if not isinstance(target, (list, tuple)) or not target:
-        raise ValueError("TARGET_PERFORMANCE must be a non-empty list of conditions")
-    for cond in target:
+def _check_conditions(level: str, conditions: Any) -> None:
+    if not isinstance(conditions, (list, tuple)) or not conditions:
+        raise ValueError(f"target level {level!r} must be a non-empty list of conditions")
+    for cond in conditions:
         if set(cond) != {"metric", "operator", "value"}:
             raise ValueError(f"target condition needs the keys metric, operator, value: {cond}")
         if cond["metric"] not in SUMMARY_COLUMNS:
@@ -317,15 +311,31 @@ def check_target_performance(target: Any) -> None:
             raise ValueError(f"unknown target operator {cond['operator']!r}; known: {TARGET_OPERATORS}")
         if isinstance(cond["value"], bool) or not isinstance(cond["value"], (int, float)):
             raise ValueError(f"target value must be a number: {cond}")
-    names = {c["metric"] for c in target}
+    names = {c["metric"] for c in conditions}
     if not names & set(TARGET_SAFETY_METRICS) or not names & set(TARGET_EFFICIENCY_METRICS):
         raise ValueError(
-            f"TARGET_PERFORMANCE needs a safety metric {TARGET_SAFETY_METRICS} and an efficiency metric "
+            f"target level {level!r} needs a safety metric {TARGET_SAFETY_METRICS} and an efficiency metric "
             f"{TARGET_EFFICIENCY_METRICS}, got {sorted(names)}"
         )
 
 
-check_target_performance(TARGET_PERFORMANCE)
+def check_target_performance(target: Any, consecutive: Any = None) -> None:
+    """Validate the pre-registered target: ``{level name: [conditions]}``, all conditions of a level must hold.
+
+    Raises ``ValueError`` for unknown metric names (not in ``SUMMARY_COLUMNS``), unknown operators, non-numeric
+    values, an empty target, and any level without at least one safety and one efficiency condition (a single
+    kind could be met by a trivial policy: braking for safety, ignoring traffic for speed). ``consecutive``
+    (``TARGET_CONSECUTIVE``), if given, must be an integer >= 1.
+    """
+    if not isinstance(target, dict) or not target:
+        raise ValueError("TARGET_PERFORMANCE must be a non-empty dict {level name: list of conditions}")
+    for level, conditions in target.items():
+        _check_conditions(str(level), conditions)
+    if consecutive is not None and (isinstance(consecutive, bool) or not isinstance(consecutive, int) or consecutive < 1):
+        raise ValueError(f"TARGET_CONSECUTIVE must be an integer >= 1, got {consecutive!r}")
+
+
+check_target_performance(TARGET_PERFORMANCE, TARGET_CONSECUTIVE)
 
 
 def summarize_metrics(df: pd.DataFrame, extra_prefix: Optional[str] = "return_") -> dict[str, float]:
