@@ -51,11 +51,15 @@ Every condition is an environment id plus config overrides on top of `BASE_CONFI
 | `long` | same, 60 s, 30 vehicles | episode length (60 s instead of 30 s) | longer drives; does the policy keep driving safely? 30 vehicles because 20 was only verified up to 30 s in the pilot (30 and 50 gave identical results up to 60 s) |
 | `precise` | `highway-v0`, 15 Hz | physics frequency, and collisions between other vehicles are checked | simulator precision: does the policy depend on the coarse 5 Hz physics of the fast variant? |
 
-**Reading `long`.** Crash risk per km is not constant over a 60 s episode, so the `long` crash rate must not be read as
-a rescaled 30 s crash rate, and `long` is compared with other models in `long`, not with `main`. In the baselines,
-idle crashes at 3.2 per 100 steps at risk during the first 30 s and 9.8 per 100 steps during the second 30 s, while
-random stays near 5 in both halves; where the risk comes from depends on the policy and on where the ego is relative to
-the traffic.
+**Reading `long`.** Crash risk per km is not constant over a 60 s episode, even for fixed policies. Idle has 1.28
+crashes/km on `main` but 1.59 on `long` (ratio 1.24; random 1.02 and faster 1.01; slower never crashes, so no ratio), and
+idle crashes at 3.2 per 100 steps at risk during the first 30 s but 9.8 during the second 30 s, while random stays near 5
+in both halves. Where the risk comes from depends on the policy and on where the ego is relative to the traffic.
+Therefore:
+
+- agents on `long` are judged relative to the baselines on the same condition: compare the agent's `long`/`main` ratio of
+  crashes per km with the baselines' ratio, and compare models with each other within `long`;
+- an agent's `long` result is never compared directly with its own `main` result as if they measured the same thing.
 
 `ego_spacing = 1.5` is pinned in `BASE_CONFIG` (it is the `highway-fast-v0` default; `highway-v0` defaults to 2), so
 `precise` starts from the same initial layout as training. `highway-fast-v0` and `highway-v0` differ otherwise only in
@@ -148,6 +152,11 @@ their uncertainty is a Wilson interval over episodes.
 | precise | idle | 70% (60%-78%) | 30% | 24.6 | 1.24 | 5% |
 | precise | slower | 0% (0%-4%) | 100% | 20.0 | 0.00 | 0% |
 | precise | faster | 98% (93%-99%) | 2% | 28.8 | 2.74 | 2% |
+
+The baseline numbers on `TEST_SEEDS` are the reference values for the report. The pilot numbers (50 seeds,
+`PILOT_SEEDS`) were used only to choose the densities and the reward weights; densities and rewards are not re-tuned on
+test results. The test-seed baselines differ from the pilot within sampling noise (idle on medium: 71% on 100 test seeds
+vs 54% on 50 pilot seeds).
 
 Checks: on the pilot seeds the pipeline reproduces the pilot's idle episodes exactly (50 of 50 crash outcomes, lengths
 and mean speeds identical at medium density). The idle crash rate on `TEST_SEEDS` (71% / 11% / 96% for medium / low /
