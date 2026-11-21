@@ -1,7 +1,7 @@
 # Configuration decisions
 
 Every value in `common/config.py` with the value chosen, the `highway-fast-v0` default, and the evidence it rests on.
-Sources: **P** = `results/pilot/PILOT_REPORT.md`, **PA** = `docs/performance_analysis.md`.
+Sources: **P** = `results/pilot/PILOT_REPORT.md`, **RF2** = `results/pilot/reward_final_v2/REWARD_FINAL_V2.md`, **PA** = `docs/performance_analysis.md`.
 All pilot numbers use scripted baseline policies (random, idle, slower, faster), 50 episodes per cell, seeds 1000..1049;
 no learning agent was trained, so the calibration is independent of the two compared algorithms.
 
@@ -70,8 +70,10 @@ Custom rewards are computed by `common.rewards.CustomRewardWrapper` from the rew
   the lighter variants can rank a crash above slow safe driving.
 - **Caveat.** The lane-change penalty of `safety` (0.5) exceeds its per-step maximum reward (0.2 + 0.1 = 0.3), so a safety
   agent is expected to change lanes rarely, even when a lane change would be useful in dense traffic.
-- **Empirical check.** The analytic p values use idealized episodes. The empirical re-check on the pilot logs
-  (`results/pilot/reward_final_v2/`) has **not** been run yet.
+- **Empirical check.** `results/pilot/reward_final_v2/REWARD_FINAL_V2.md` (regenerated pilot data, scripted baselines only,
+  2,000-resample bootstrap; commands in `README.md`, "Reproducing the pilot"): at gamma = 1 and 0.99 all three variants pass
+  the ordering at every density, with empirical p (low / medium / high) of 0.11 / 0.36 / 0.46 (efficiency), 0.55 / 0.73 / 0.74
+  (balanced) and 0.82 / 0.90 / 0.89 (safety). At gamma = 0.9 and 0.8 only `safety` passes everywhere.
 
 ## Seeds
 

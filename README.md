@@ -62,6 +62,27 @@ pip install -r requirements.txt   # includes pytest
 python -m pytest                  # about 15 s: config and real-env checks
 ```
 
+## Reproducing the pilot
+
+`results/` is git-ignored, so the reward pilot data is regenerated from scratch (about 2 minutes with 8 workers; only
+scripted baseline policies are simulated, no agent is trained). Run from the repository root:
+
+```bash
+# 1. Simulate random / idle / slower / faster on low / medium / high density, seeds 1000..1049 (600 episodes)
+.venv/Scripts/python.exe scripts/pilot/reward_v2_collect.py --workers 8
+#    -> results/pilot/reward_v2/steps.csv, episodes.csv
+# 2. Knox et al. check of the reward weights in common/config.py (2,000-resample bootstrap, gamma 1 / 0.99 / 0.9 / 0.8)
+.venv/Scripts/python.exe scripts/pilot/reward_final_analyze.py
+#    -> results/pilot/reward_final_v2/knox_final.csv, plots/
+# 3. Build the report
+.venv/Scripts/python.exe scripts/pilot/reward_final_report.py
+#    -> results/pilot/reward_final_v2/REWARD_FINAL_V2.md
+```
+
+All seeds are fixed (episode seeds 1000..1049, bootstrap seed 0), so the data is identical on every run and does not
+depend on `--workers` (checked byte for byte with 8 and 4 workers). Use `--resume` with step 1 to continue an
+interrupted run. On Linux/macOS use `.venv/bin/python`.
+
 ## Random baseline
 
 ```bash
