@@ -170,6 +170,24 @@ env): 98 microseconds per step with the leader / time-to-collision part, 6 micro
 simulator step: **0.40%** and 0.02% of the step time (one quiet process, identical seeds and actions, variants
 interleaved, 645 steps each, three repetitions: 0.39-0.41%). The leader part therefore stays on.
 
+## Calibration with Stable-Baselines3
+
+Before anything is frozen, reference implementations (SB3 DQN, which is vanilla DQN with a target network and **not** Double DQN, and SB3 PPO)
+are trained in our environment to check the reward presets, the density levels and test conditions, the seed-to-seed spread and the
+budget / validation / target settings. **Calibration only**: these runs are never part of the DDQN vs PPO comparison and never enter the main
+tables. Code in `scripts/calibration/`, extra dependency in `requirements-calibration.txt`, run seeds `CALIBRATION_SEEDS = [99, 98]` (98 is used
+nowhere else), outputs in `results/calibration/` (deliberately outside `results/runs` and `results/eval`, so the main-grid loaders never see them),
+evaluation on `VAL_SEEDS` only (`TEST_SEEDS` stay untouched). Report: `docs/calibration.md`.
+
+```bash
+pip install -r requirements-calibration.txt
+python -m scripts.calibration.run_plan --dry-run           # quiet benchmark + estimate + schedule, starts nothing
+python -m scripts.calibration.run_plan --dqn-slots 5        # whole plan; run again after a crash / sleep to resume
+python -m scripts.calibration.train_sb3 --algo ppo --reward balanced --seed 99 [--resume]   # one run
+python -m scripts.calibration.evaluate_final --workers 8    # P4: final models + baselines, 5 conditions, VAL_SEEDS
+python -m scripts.calibration.analyze                       # docs/calibration.md and results/calibration/plots/
+```
+
 ## Evaluation
 
 The protocol is in `docs/evaluation_protocol.md`. In code:

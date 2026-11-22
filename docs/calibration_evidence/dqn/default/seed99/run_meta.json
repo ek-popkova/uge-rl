@@ -1,0 +1,202 @@
+{
+  "status": "finished",
+  "error": null,
+  "identity": {
+    "algorithm": "sb3_dqn",
+    "train_reward": "default",
+    "train_density": "medium",
+    "seed": 99,
+    "variant": "calibration",
+    "overridden_keys": []
+  },
+  "hyperparameters": {
+    "learning_rate": 0.0005,
+    "buffer_size": 15000,
+    "learning_starts": 200,
+    "batch_size": 32,
+    "gamma": 0.99,
+    "train_freq": 1,
+    "gradient_steps": 1,
+    "target_update_interval": 50,
+    "exploration_fraction": 0.3,
+    "exploration_initial_eps": 1.0,
+    "exploration_final_eps": 0.05,
+    "tau": 1.0,
+    "max_grad_norm": 10,
+    "net_arch": [
+      256,
+      256
+    ],
+    "activation_fn": "ReLU"
+  },
+  "budget": {
+    "total_env_steps": 200000,
+    "val_every_env_steps": 5000,
+    "val_n_episodes": 20,
+    "checkpoint_every_seconds": 600.0
+  },
+  "budget_overrides": [],
+  "resolved": {
+    "exploration_steps": 60000
+  },
+  "placeholders_in_use": [],
+  "env": {
+    "env_id": "highway-fast-v0",
+    "config": {
+      "observation": {
+        "type": "Kinematics"
+      },
+      "action": {
+        "type": "DiscreteMetaAction"
+      },
+      "simulation_frequency": 5,
+      "policy_frequency": 1,
+      "other_vehicles_type": "highway_env.vehicle.behavior.IDMVehicle",
+      "screen_width": 600,
+      "screen_height": 150,
+      "centering_position": [
+        0.3,
+        0.5
+      ],
+      "scaling": 5.5,
+      "show_trajectories": false,
+      "render_agent": true,
+      "offscreen_rendering": true,
+      "manual_control": false,
+      "real_time_rendering": false,
+      "neighbour_vehicles_connected_lanes": false,
+      "lanes_count": 3,
+      "vehicles_count": 20,
+      "controlled_vehicles": 1,
+      "initial_lane_id": null,
+      "duration": 30,
+      "ego_spacing": 1.5,
+      "vehicles_density": 0.7,
+      "collision_reward": -1,
+      "right_lane_reward": 0.1,
+      "high_speed_reward": 0.4,
+      "lane_change_reward": 0,
+      "reward_speed_range": [
+        20,
+        30
+      ],
+      "normalize_reward": true,
+      "offroad_terminal": false
+    },
+    "reward": "default",
+    "reward_weights": {},
+    "action_index": {
+      "LANE_LEFT": 0,
+      "IDLE": 1,
+      "LANE_RIGHT": 2,
+      "FASTER": 3,
+      "SLOWER": 4
+    },
+    "observation_shape": [
+      5,
+      5
+    ],
+    "near_miss_ttc": 1.5,
+    "reversal_window": 3
+  },
+  "reproducibility": {
+    "git": {
+      "commit": "a3f0c0857bf343499cb4004abde2d0cba8d7ddd2",
+      "dirty": true
+    },
+    "versions": {
+      "python": "3.13.3",
+      "torch": "2.15.0+cpu",
+      "gymnasium": "1.4.0",
+      "highway_env": "1.12.1",
+      "numpy": "2.5.5",
+      "pandas": "3.1.1",
+      "stable_baselines3": "2.9.2"
+    },
+    "os": "Windows-11-10.0.26300-SP0",
+    "cpu_model": "Intel(R) Core(TM) Ultra 9 285H",
+    "logical_cores": 16,
+    "thread_env_vars": {
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1"
+    },
+    "torch_num_threads": 1,
+    "device": "cpu",
+    "workers": 1
+  },
+  "timing": {
+    "start_time": "2026-11-21T22:29:12+00:00",
+    "end_time": "2026-11-22T02:37:12+00:00",
+    "total_wall_s": 14879.608498000016,
+    "env_time_s": 11997.123798097193,
+    "update_time_s": 1684.6590666025295,
+    "val_time_s": 1196.1925355003332,
+    "checkpoint_time_s": 1.6330977999605238,
+    "train_steps_per_s": 14.617977926355444,
+    "post_training_benchmark_s": null,
+    "quiet_benchmark_steps_per_s": null,
+    "final_env_step": 200000,
+    "n_episodes": 8789,
+    "n_updates": 199800,
+    "n_val_points": 40
+  },
+  "model": {
+    "n_parameters": 73733
+  },
+  "inference": {
+    "median_ms": 0.0613,
+    "p90_ms": 0.0732,
+    "mean_ms": 0.0648376,
+    "n": 1000,
+    "warmup": 100,
+    "batch_size": 1,
+    "threads": 1,
+    "n_distinct_observations": 75
+  },
+  "logging": {
+    "update_log_every": 100
+  },
+  "milestones": [],
+  "resumes": [],
+  "calibration": {
+    "purpose": "calibration only; never part of the DDQN vs PPO comparison",
+    "library": "stable-baselines3",
+    "library_version": "2.9.2",
+    "algorithm_note": "SB3 DQN = vanilla DQN with a target network (max target), NOT Double DQN",
+    "hyperparameter_sources": {
+      "learning_rate": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "buffer_size": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "learning_starts": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "batch_size": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "gamma": "frozen shared decision (common/train_config.py); the example uses 0.8",
+      "train_freq": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "gradient_steps": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "target_update_interval": "HighwayEnv scripts/sb3_highway_dqn.py (master, fetched 2026-11-21)",
+      "exploration_fraction": "calibration task specification: epsilon reaches its final value at 30% of the run (example: SB3 default 0.1)",
+      "exploration_initial_eps": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "exploration_final_eps": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "tau": "SB3 2.9.2 default (the HighwayEnv example gives no value) (hard target update)",
+      "max_grad_norm": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "net_arch": "frozen shared decision (common/train_config.py), same as the example",
+      "activation_fn": "frozen shared decision (common/train_config.py); SB3 DQN default"
+    },
+    "validation": {
+      "seeds": "VAL_SEEDS[:20]",
+      "condition": "main",
+      "deterministic": true,
+      "validation_workers": 1
+    },
+    "timing_note": "env_time_s = wall - update - validation - checkpoint (includes SB3 action selection and buffer overhead)",
+    "resume_note": "a resume restarts the in-flight episodes with new derived seeds; not bit-identical (see sb3_train.py)"
+  },
+  "early_warning": {
+    "checked_at_env_step": 100000,
+    "crash_rate": 0.7833333333333333,
+    "return_own": 19.164932520874498,
+    "random_crash_rate": 0.7,
+    "random_return_own": 17.50219229927473,
+    "random_return_se": 1.4165654194772226,
+    "at_random_level": true
+  }
+}

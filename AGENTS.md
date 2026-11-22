@@ -9,6 +9,7 @@ See `README.md` for layout and setup.
 - Python: use the project venv (`.venv/Scripts/python.exe` on Windows). Code comments in English.
 - `common/config.py` holds team-agreed placeholders. Do not change its values unless asked.
 - Experiment outputs go to `results/` (git-ignored); do not commit results.
+- SB3 calibration runs (`scripts/calibration/`, report `docs/calibration.md`) are calibration only: run seeds `CALIBRATION_SEEDS = [99, 98]` (98 is reserved for them), outputs in `results/calibration/`, evaluated on `VAL_SEEDS` only; never part of the DDQN vs PPO comparison.
 - A new metric, log column or algorithm component gets a test on a hand-built case in the same change (see "Tests: why they exist and when to run them").
 
 ## Performance rules

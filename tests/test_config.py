@@ -90,3 +90,33 @@ def test_seed_set_values():
     assert TEST_SEEDS == list(range(10000, 10100))
     assert PILOT_SEEDS == list(range(1000, 1050))
     assert EVAL_SEEDS is TEST_SEEDS  # backwards-compatible alias
+
+
+def test_calibration_seeds_are_isolated():
+    """Calibration run seeds [99, 98]: 98 is used nowhere else, and its derived vector-env seeds collide with nothing."""
+    from common.config import CALIBRATION_ONLY_SEED, CALIBRATION_SEEDS
+    from common.seeding import MAX_ENVS_PER_RUN, derived_env_seeds
+
+    assert CALIBRATION_SEEDS == [99, 98] and CALIBRATION_ONLY_SEED == 98 and PILOT_RUN_SEED == 99
+    others = {"pilot": PILOT_SEEDS, "train": TRAIN_SEEDS, "sensitivity": SENSITIVITY_SEEDS, "val": VAL_SEEDS,
+              "test": TEST_SEEDS, "pilot_run": [PILOT_RUN_SEED]}
+    for name, seeds in others.items():
+        assert 98 not in seeds, f"98 is in {name}"
+    cal = set(derived_env_seeds(98, MAX_ENVS_PER_RUN))
+    assert len(cal) == MAX_ENVS_PER_RUN
+    for name, seeds in others.items():
+        assert not cal & set(seeds), f"derived seeds of 98 collide with {name}"
+    for run in (*TRAIN_SEEDS, *SENSITIVITY_SEEDS, PILOT_RUN_SEED):  # 99 is also a calibration run seed: checked here too
+        assert not cal & set(derived_env_seeds(run, MAX_ENVS_PER_RUN)), f"derived seeds of 98 and {run} collide"
+    # the derived seeds of 99 (calibration run 1) collide with no episode-seed set either
+    d99 = set(derived_env_seeds(99, MAX_ENVS_PER_RUN))
+    for name, seeds in others.items():
+        assert not d99 & set(seeds)
+
+
+def test_harness_refuses_calibration_seed():
+    from common.train_config import check_run_roles
+
+    for variant in ("main", "tune-a", "lr=0.001"):
+        with pytest.raises(ValueError, match="reserved for the SB3 calibration"):
+            check_run_roles(variant, 98, "balanced", "medium", [], [])

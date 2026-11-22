@@ -13,6 +13,8 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Any
 
+from common.seeding import MAX_ENVS_PER_RUN, derived_env_seeds
+
 ENV_ID = "highway-fast-v0"
 
 # Base environment configuration passed to gym.make(..., config=...).
@@ -146,6 +148,25 @@ for (_a, _sa), (_b, _sb) in combinations(_seed_sets.items(), 2):
 assert not set(SENSITIVITY_SEEDS) & (set(PILOT_SEEDS) | set(VAL_SEEDS) | set(TEST_SEEDS) | {PILOT_RUN_SEED}), (
     "seed sets overlap"
 )
+
+# Calibration runs with Stable-Baselines3 reference implementations (scripts/calibration/, outputs in results/calibration/,
+# never part of the DDQN vs PPO comparison). Run seeds [99, 98]: 99 is PILOT_RUN_SEED (its derived vector-env seeds are
+# already checked against every other set), 98 is used ONLY here: no other set contains it, no other run uses it
+# (common.train_config.check_run_roles refuses it in the main harness) and its derived vector-env seeds
+# (common.seeding.derived_env_seeds) collide with no seed of any other set or of any other run seed.
+CALIBRATION_SEEDS: list[int] = [99, 98]
+CALIBRATION_ONLY_SEED = 98
+
+_other_sets = [PILOT_SEEDS, TRAIN_SEEDS, SENSITIVITY_SEEDS, VAL_SEEDS, TEST_SEEDS, [PILOT_RUN_SEED]]
+_other_seeds = {s for _s in _other_sets for s in _s}
+_other_derived = {  # derived vector-env seeds of every other run seed (all 1000 env indices)
+    d for _run in (*TRAIN_SEEDS, *SENSITIVITY_SEEDS, PILOT_RUN_SEED) for d in derived_env_seeds(_run, MAX_ENVS_PER_RUN)
+}
+_cal_derived = set(derived_env_seeds(CALIBRATION_ONLY_SEED, MAX_ENVS_PER_RUN))
+assert CALIBRATION_SEEDS == [PILOT_RUN_SEED, CALIBRATION_ONLY_SEED]
+assert CALIBRATION_ONLY_SEED not in _other_seeds, "calibration seed 98 is used by another seed set"
+assert not _cal_derived & (_other_seeds | _other_derived), "derived env seeds of calibration seed 98 collide"
+assert not set(derived_env_seeds(PILOT_RUN_SEED, MAX_ENVS_PER_RUN)) & _cal_derived
 
 # Tuning and sensitivity protocol (shared decisions; docs/config_decisions.md "Shared training decisions").
 # Tuning: at most TUNING_MAX_CONFIGS configurations per algorithm (the defaults + up to 3 variations of algorithm-specific

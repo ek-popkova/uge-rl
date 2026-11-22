@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Mapping, Optional, Sequence
 
 from common.config import (
+    CALIBRATION_ONLY_SEED,
     MIN_GAMMA,
     PILOT_RUN_SEED,
     SENSITIVITY_DENSITY,
@@ -367,6 +368,8 @@ def check_run_roles(
     ``TUNING_DENSITY``, may override algorithm-specific hyperparameters only (never ``SHARED_KEYS``) and must use the
     default budget and validation settings (no budget overrides). Conversely ``PILOT_RUN_SEED`` is reserved for tuning.
     """
+    if seed == CALIBRATION_ONLY_SEED:  # reserved for the SB3 calibration runs (scripts/calibration/), never a result seed
+        raise ValueError(f"run seed {CALIBRATION_ONLY_SEED} (CALIBRATION_ONLY_SEED) is reserved for the SB3 calibration runs")
     if not is_tuning_variant(variant):
         if seed == PILOT_RUN_SEED:
             raise ValueError(

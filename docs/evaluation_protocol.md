@@ -33,6 +33,7 @@ that the text can be copied into the report. Code: `common/evaluate.py`, `common
 | `TRAIN_SEEDS` | 0..4 | run seeds of the main grid |
 | `SENSITIVITY_SEEDS` | 0, 1, 2 | run seeds of the sensitivity runs (reuse training seeds 0..2: the base point is the main-grid run) |
 | `PILOT_RUN_SEED` | 99 | run seed of the hyperparameter tuning runs (`tune-<name>` variants), never a result seed |
+| `CALIBRATION_SEEDS` | 99, 98 | run seeds of the SB3 calibration runs (`scripts/calibration/`, `docs/calibration.md`; 99 is `PILOT_RUN_SEED`, 98 is used nowhere else and refused by the training harness); never result seeds |
 | `VAL_SEEDS` | 20000..20019 | episode seeds of the periodic evaluation during training (learning curves) |
 | `TEST_SEEDS` | 10000..10099 | episode seeds of the final evaluation, used once |
 
