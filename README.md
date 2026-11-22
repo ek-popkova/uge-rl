@@ -80,11 +80,11 @@ The shared settings live in `common/config.py` and were chosen from the environm
 
 ```bash
 pip install -r requirements-lock.txt   # includes pytest
-python -m pytest -m "not slow"    # fast tier: 83 tests in 4-8 s (pure functions and fake envs; use during development)
-python -m pytest                  # full suite: 143 tests in 227 s (3 min 47 s; 146 s in an earlier quiet run, wall time varies 2-5x here, C8)
+python -m pytest -m "not slow"    # fast tier: 126 tests in about 4 s (pure functions and fake envs; use during development)
+python -m pytest                  # full suite: 198 tests in 243 s (4 min 3 s; wall time varies 2-5x here, C8)
 ```
 
-The 60 `slow` tests create a real highway-env environment or run episodes (evaluation determinism, spawned workers, the
+The 72 `slow` tests create a real highway-env environment or run episodes (evaluation determinism, spawned workers, the
 training harness end to end with the `RandomTrainer`, the scripted baselines against `TARGET_PERFORMANCE`). Durations were
 measured on this machine with nothing else running; do not run the tests while training or timing benchmarks are running
 (they load the CPU and distort the measured steps/s). When to run which tier: `CLAUDE.md`, "Tests: why they exist and when
@@ -223,5 +223,13 @@ baselines (`--algo idle`, ...) can be used to try the pipeline.
 
 ## Team
 
-- TBD (Double DQN)
-- TBD (PPO)
+- NAME_1: Double DQN (implemented, tuned and trained on machine 1)
+- NAME_2: PPO (implemented, tuned and trained on machine 2)
+
+Work split: the shared code (`common/`, protocol, tests) is common; the runs are split BY ALGORITHM, not by training seed. All DDQN
+runs (main grid, tuning, sensitivity) are trained on one machine and all PPO runs on the other; each owner chooses their own
+algorithm-specific hyperparameters during tuning. Because algorithm and hardware are therefore confounded, DDQN vs PPO cost is compared
+only by hardware-independent metrics (env steps to the target levels and to the plateau, gradient updates, parameter count); wall times,
+steps/s and inference time are reported per machine and never compared between the algorithms. Both machines use the same library
+versions (`requirements-lock.txt`, `scripts/check_env.py`) and the same resource limit: at most 8 busy simulator processes at the same
+time (`CLAUDE.md`, "Two machines, split BY ALGORITHM"; `docs/performance_analysis.md` C5).
