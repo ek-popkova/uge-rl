@@ -12,8 +12,9 @@ harness wraps the run in try/finally. Sections:
     placeholders_in_use   undecided config values this run used (common.train_config)
     env               env id, the resolved env config actually used (env.unwrapped.config), reward weights,
                       action index mapping, observation shape, NEAR_MISS_TTC, REVERSAL_WINDOW
-    reproducibility   git commit + dirty flag, library versions, OS, CPU model, logical cores, thread
-                      settings, device, workers
+    reproducibility   git commit + dirty flag, library versions, OS, machine identifier (hostname), CPU model,
+                      logical cores, thread settings, device, workers, onedrive_path (project or output directory
+                      inside a OneDrive folder: file locks crashed calibration runs, docs/calibration.md)
     timing            timestamps, wall time, env / update / val / checkpoint seconds, steps/s without
                       validation, the quiet benchmark steps/s, final env step, episodes, updates, val points
     model             number of trainable parameters;  inference  ms per action (common.benchmark)
@@ -25,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import socket
 import subprocess
 import sys
 import tempfile
@@ -125,6 +127,37 @@ def cpu_model() -> str:
     return platform.processor() or "unknown"
 
 
+ONEDRIVE_ENV_VARS = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
+
+
+def hostname() -> str:
+    """Machine identifier stored in run_meta.json: wall times are only compared between runs with the same one."""
+    try:
+        return socket.gethostname() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def is_onedrive_path(path: Any, environ: Optional[dict[str, str]] = None) -> bool:
+    """True if ``path`` lies inside a OneDrive folder: a path component named like OneDrive (``OneDrive``,
+    ``OneDrive - Company``, ...) or a path below one of the directories in the OneDrive environment variables
+    (``OneDrive``, ``OneDriveConsumer``, ``OneDriveCommercial``, set by Windows). Checked on the absolute path and on
+    the path with links resolved. ``environ`` defaults to ``os.environ``."""
+    env = os.environ if environ is None else environ
+    roots = [os.path.normcase(os.path.abspath(env[name])) for name in ONEDRIVE_ENV_VARS if env.get(name)]
+    candidates = {os.path.normcase(os.path.abspath(str(path)))}
+    try:
+        candidates.add(os.path.normcase(str(Path(path).resolve())))
+    except (OSError, RuntimeError):
+        pass
+    for cand in candidates:
+        if "onedrive" in cand.lower():
+            return True
+        if any(cand == root or cand.startswith(root.rstrip("/\\") + os.sep) for root in roots):
+            return True
+    return False
+
+
 def _version(module: str) -> Optional[str]:
     try:
         return str(__import__(module).__version__)
@@ -132,7 +165,9 @@ def _version(module: str) -> Optional[str]:
         return None
 
 
-def reproducibility_info(device: str, workers: int) -> dict[str, Any]:
+def reproducibility_info(device: str, workers: int, output_dir: Optional[Path] = None) -> dict[str, Any]:
+    """Versions, machine and settings of a run. ``onedrive_path`` is True if the project directory or ``output_dir`` lies
+    inside a OneDrive folder."""
     import torch
 
     versions = {
@@ -147,12 +182,14 @@ def reproducibility_info(device: str, workers: int) -> dict[str, Any]:
         "git": git_info(),
         "versions": versions,
         "os": platform.platform(),
+        "hostname": hostname(),
         "cpu_model": cpu_model(),
         "logical_cores": os.cpu_count(),
         "thread_env_vars": {name: os.environ.get(name) for name in THREAD_ENV_VARS},
         "torch_num_threads": torch.get_num_threads(),
         "device": device,
         "workers": workers,
+        "onedrive_path": any(is_onedrive_path(p) for p in (ROOT, output_dir) if p is not None),
     }
 
 

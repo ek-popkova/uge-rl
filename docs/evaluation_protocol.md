@@ -163,20 +163,31 @@ steps) and the actual `env_step` is stored; a last validation always happens at 
   training wall time (without validation time, `train_wall_s`) at which a run reaches a target level. A level is a list
   of behavioural conditions (comparable across reward presets) that must ALL hold at the same validation point, with
   at least one safety and one efficiency condition (validated at import). It is reached at the **first of
-  `TARGET_CONSECUTIVE = 2` consecutive validation points** at which all its conditions hold, and that first point's
+  `TARGET_CONSECUTIVE = 3` consecutive validation points** (for both levels) at which all its conditions hold, and that first point's
   `env_step` and `train_wall_s` are reported; NaN if the level is never reached. Validation uses 20 episodes, so
   `crash_rate` moves in steps of 0.05 and one lucky point must not count (an isolated passing point does not).
 - **Two pre-registered levels**, both reported for every run and fixed before training (section 10):
   `beats_idle` (strictly better than idle on both metrics on `VAL_SEEDS`: crash rate below 0.60 and mean speed above
-  24.8 m/s) and `strong` (crash rate <= 0.2 and mean speed >= 25.5 m/s). If `strong` turns out unreachable (NaN for every
+  24.8 m/s) and `strong` (crash rate <= 0.4 and mean speed >= 25.5 m/s). If `strong` turns out unreachable (NaN for every
   model), `beats_idle` still allows a comparison, and no threshold is changed after seeing results.
 - **The levels are joint and must stay unreachable for the scripted baselines.** `slower` has a 0% crash rate at 20 m/s
   on `main`, so a crash bound alone would reward an agent that only learns to brake; `idle` crashes in 71% of the
   episodes at 24.7 m/s on `main` (VAL_SEEDS: 0.60 and 24.8 m/s). `tests/test_training.py::test_no_scripted_baseline_meets_target_performance`
   runs the four baselines through `validate()` on `VAL_SEEDS` and fails if one meets either level, which guards the values
   against later edits. `beats_idle` is derived from the idle baseline (crash rate 0.6 exactly and mean speed 24.7564 m/s on
-  `VAL_SEEDS`, the latter rounded up to 24.8) and needs no team decision; `strong` and `TARGET_CONSECUTIVE` are placeholders until
-  the team decides them after the pilot runs.
+  `VAL_SEEDS`, the latter rounded up to 24.8) and needs no team decision; `strong` and `TARGET_CONSECUTIVE = 3` were decided by the team after the SB3 calibration
+  (`docs/config_decisions.md`, "Values frozen after the calibration"; evidence `docs/calibration.md` section 4).
+- **Steps to the plateau** (`common.aggregate.steps_to_plateau`, post-hoc: it is computed from the finished validation curve and never
+  used to stop a run; every run trains for the full budget). Pre-registered constants `PLATEAU_WINDOW = 5` and `PLATEAU_TOL = 0.10`.
+  For the metric `return_own` (the return under the run's own training reward, `return_<reward>`): final level = mean of the raw metric
+  over the last 20% of the validation points; improvement = final level minus the first validation value; the curve is smoothed with a
+  rolling mean over `window` validation points (the window that starts at the point, so a clean step is found at the step, not
+  `window - 1` points later); the plateau point is the earliest validation point from which the smoothed curve stays within
+  `tol * improvement` of the final level until the end. The tolerance is relative to the improvement, not to the return, because a fixed
+  5% of the return was smaller than the validation noise of DQN in the calibration. The result holds the `env_step` and `train_wall_s`
+  of that point and `censored = True` if it lies inside the last 20% of the points (the run may not have converged); with no improvement
+  (or no stable plateau) the result is NaN with `censored = True`. Per model, then mean and 95% t-interval over seeds, NaN-aware, with the
+  number of seeds that reached it and the number of censored ones (`cost_per_model`, `cost_across_seeds`). Report censored runs as such.
 
 ## 8. Baselines
 
@@ -254,9 +265,9 @@ episodes; the metric definitions including the near-miss threshold of 1.5 s and 
 `TARGET_PERFORMANCE` (both levels) and `TARGET_CONSECUTIVE`; deterministic evaluation of the final checkpoint; the aggregation (seed as unit, 95% Student-t
 interval over seeds); gamma >= 0.99; the same step budget (`TrainBudget`: total steps, validation interval and number of
 validation episodes) and network size for both algorithms; the treatment of time-limit truncation. Any deviation is reported
-as such. The shared open items at the time of writing are `total_env_steps`, `val_every_env_steps`, `val_n_episodes`,
-`TARGET_PERFORMANCE["strong"]` and `TARGET_CONSECUTIVE`; the algorithm-specific hyperparameters are still placeholders too
-(list in `CLAUDE.md`, "TO DECIDE BEFORE TRAINING"). All must be decided before the first training run.
+as such. No shared item is open any more: the values below were decided after the SB3 calibration (`docs/config_decisions.md`, "Values
+frozen after the calibration"); only the algorithm-specific hyperparameters are still placeholders (list in `CLAUDE.md`, "TO DECIDE
+BEFORE TRAINING") that their owners choose during tuning, before the first main-grid run.
 
 Shared training decisions, agreed by the team (`docs/config_decisions.md`, "Shared training decisions"); they may only change by
 team agreement, and a change after the main grid has started is reported as a deviation:
@@ -281,6 +292,19 @@ team agreement, and a change after the main grid has started is reported as a de
   main run in anything but its varied parameter. Relative values are resolved from the base config at expansion time; the
   absolute values are in the run's `run_meta.json` (`hyperparameters`, plus `resolved.eps_decay_steps` for the DDQN epsilon
   schedule). The 24 runs for the current placeholder bases are listed in `docs/config_decisions.md`.
+- **Budget (frozen after the calibration):** `total_env_steps = 300,000`, `val_every_env_steps = 12,000` (25 validation points per
+  learning curve), `val_n_episodes = 20` (all `VAL_SEEDS`), the same for DDQN and PPO, tuning and sensitivity runs. PPO updates in rollouts of
+  `n_envs * n_steps` env steps, so this product must divide both 300,000 and 12,000 (any divisor of 12,000, e.g. 1,000, 2,000, 3,000,
+  4,000, 6,000, 12,000); `check_budget_matches_rollout` raises otherwise and names the nearest valid values.
+- **Target levels (frozen after the calibration):** `beats_idle` (crash rate < 0.6, mean speed > 24.8 m/s) and `strong` (crash rate <= 0.4,
+  mean speed >= 25.5 m/s), each reached at `TARGET_CONSECUTIVE = 3` consecutive validation points; both stay unreachable for every scripted
+  baseline. Every run trains for the full budget (no early stopping).
+- **Plateau rule (pre-registered):** `steps_to_plateau` with `PLATEAU_WINDOW = 5` and `PLATEAU_TOL = 0.10` (section 7), applied after
+  training; not changed after the main grid has started.
+- **Two machines:** the main grid and the sensitivity runs are split by training seed (for example seeds 0-2 on one machine, 3-4 on the
+  other), so that each machine runs both algorithms and all rewards. Wall times are compared only within one machine; the primary cost
+  metrics are env steps to a target and to the plateau, which do not depend on the hardware; inference time is compared only within one
+  machine (section 11).
 - **Video milestones** `milestone_fractions = (0.1, 0.25, 0.5)` plus the always-kept final checkpoint, and the video episode
   rule in section 11.
 
@@ -308,8 +332,8 @@ Every training run (`common/training.py`, the same for DDQN and PPO) writes, wit
 - `run_meta.json`: algorithm, training reward and density, seed, variant and overridden keys; the full hyperparameters
   and `TrainBudget`; the fully resolved env config actually used (`env.unwrapped.config`), env id, reward weights, the
   action index mapping (checked against `common.actions.ACTION_INDEX`, the run fails loudly if highway-env changes it),
-  observation shape, `NEAR_MISS_TTC`, `REVERSAL_WINDOW`; git commit and dirty flag, library versions, OS, CPU model, logical
-  cores, thread settings, device, `--workers`; timestamps, wall time and its split into env / update / validation /
+  observation shape, `NEAR_MISS_TTC`, `REVERSAL_WINDOW`; git commit and dirty flag, library versions, OS, machine identifier (`hostname`), CPU model, logical
+  cores, thread settings, device, `--workers`, `onedrive_path` (whether the project or the output directory lies inside a OneDrive folder); timestamps, wall time and its split into env / update / validation /
   checkpoint seconds, training steps/s without validation, the quiet benchmark steps/s measured before training, final env
   step, episodes, updates, status (`running` / `finished` / `failed`, also on a crash or Ctrl-C), the number of trainable
   parameters and the inference time.
@@ -320,9 +344,22 @@ warm-up calls, then 1,000 timed calls; median and 90th percentile are stored (al
 training and only meaningful in a quiet process: other running jobs inflate it (CLAUDE.md rule 1, C8), so for runs trained
 in parallel the cost comparison repeats the benchmark on the saved checkpoints in a quiet process.
 
-**Computational cost** is reported as (a) env steps to the `TARGET_PERFORMANCE` levels (section 7), (b) the update cost per env step
+**Computational cost** is reported as (a) env steps to the `TARGET_PERFORMANCE` levels and to the plateau (section 7; these do not
+depend on the hardware and are the primary metrics), (b) the update cost per env step
 (the `update_time_s` / `env_time_s` split, which does not depend on the speed of the simulator), (c) the inference time and
 (d) the parameter count. Raw wall time of runs that ran in parallel is not compared across algorithms.
+
+**Two machines.** The main grid and the sensitivity runs are split over two computers by training seed (for example seeds 0-2 on one,
+3-4 on the other), so that each machine runs both algorithms and all rewards. Everything measured in seconds (`train_wall_s`, wall time to
+a target or plateau, steps/s, update time per env step, inference time) is only compared within one machine: `common.aggregate.cost_across_seeds`
+groups these columns by the machine identifier (`reproducibility.hostname`) and never pools them across machines, while env steps to a
+target or plateau are pooled over all machines. The inference benchmark of the cost comparison is repeated on the saved checkpoints in a
+quiet process on each machine.
+
+**OneDrive.** During the calibration, OneDrive locked files and 6 runs crashed with `PermissionError`; a resumed run is not bit-identical to an
+uninterrupted one. At the start of a run the harness prints a prominent warning if the project or the output directory is inside a
+OneDrive folder (a path component named like OneDrive, or a path below the OneDrive environment variables on Windows) and records
+`onedrive_path` in `run_meta.json`; it does not block the run. Move the project out of OneDrive (or pause sync) and disable sleep before long runs.
 
 **Resume and determinism.** `resume.pt` holds the trainer state, the simulator state of every env (the running episode
 included), the RNG states, the timers and the logger position; rows logged beyond the checkpoint `env_step` are dropped.

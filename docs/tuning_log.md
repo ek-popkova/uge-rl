@@ -27,6 +27,11 @@ print(tuning_table(logs))            # config, criterion, crash_rate, last_env_s
 print(select_tuning_config(logs))    # name of the chosen configuration
 ```
 
+Tuning runs use the frozen default budget (300,000 steps, validation every 12,000 steps; `check_run_roles` refuses budget overrides), so
+their curves match the main grid. For PPO, `n_envs * n_steps` must divide both 300,000 and 12,000 (for example 1,000, 2,000, 3,000, 4,000,
+6,000, 12,000), otherwise the run is refused (`check_budget_matches_rollout`). Start them with `--force` (a 300,000-step run exceeds the
+default 45-minute estimate limit).
+
 Copy the chosen configuration's values into the algorithm's defaults in `common/train_config.py` (and remove the
 `PLACEHOLDER` marker of every field that is decided this way); the main grid and the sensitivity base point use them.
 

@@ -363,6 +363,23 @@ Earliest validation point after which the trailing mean over 3 points of the own
 **Runs that have not plateaued by the end of the budget:** DQN balanced s98, DQN balanced s99, DQN default s99, DQN efficiency s99, DQN safety s99, PPO balanced s98, PPO efficiency s99, PPO safety s99.
 
 
+### Plateau rule of the main grid applied to these curves (sanity check, reported only)
+
+`common.aggregate.steps_to_plateau` (post-hoc, pre-registered for the main grid): the final level is the mean of the raw own-reward return over the last 20% of the validation points, the improvement is the final level minus the first value, and the plateau point is the earliest point from which the rolling mean over 5 points (the window starting at the point) stays within 10% of the improvement of the final level. "censored" = the point lies inside the last 20% of the curve, or there is no improvement / no stable plateau (n/a). These curves have 40 validation points 5,000 steps apart, so the window spans 25,000 steps here (the main grid will have 25 points 12,000 steps apart, 60,000 steps per window). Nothing was changed because of this table.
+
+| run | validation points | plateau env_step | censored | final level (own return) | improvement |
+|---|---:|---:|---:|---:|---:|
+| DQN balanced s98 | 40 | n/a | yes | 3.52 | 6.91 |
+| DQN balanced s99 | 40 | 180,000 | yes | 4.33 | 9.48 |
+| DQN default s99 | 40 | 180,000 | yes | 23.26 | 1.93 |
+| DQN efficiency s99 | 40 | 125,000 | no | 12.37 | 17.07 |
+| DQN safety s99 | 40 | n/a | yes | -0.37 | 7.04 |
+| PPO balanced s98 | 40 | 165,888 | yes | 4.36 | 3.21 |
+| PPO balanced s99 | 40 | 55,296 | no | 4.08 | 2.93 |
+| PPO default s99 | 40 | 110,592 | no | 22.93 | 2.16 |
+| PPO efficiency s99 | 40 | n/a | yes | 0.67 | 0.61 |
+| PPO safety s99 | 40 | 116,736 | no | 2.96 | 1.82 |
+
 ### Progress at fixed budgets
 
 Validation values averaged over the points within +-10,000 steps of the budget, own-reward return (crash rate and speed at 100k and over the last 20%). The last column is the share of the improvement from the first three points to the last 20% that was already made at 100k.
@@ -546,6 +563,12 @@ Evidence is in section 2. Flagged as uninformative: none.
 
 Written after reading sections 0-5. Everything refers to 20 `VAL_SEEDS` episodes, one seed per reward (two for balanced), SB3 reference implementations with
 no tuning. Nothing was changed in `common/config.py` or `common/train_config.py`; the items below are proposals for the team.
+
+> **Outcome (team decision after this report).** The team froze the shared values in a follow-up change
+> (`docs/config_decisions.md`, "Values frozen after the calibration"): `total_env_steps = 300,000` (instead of the 200,000 recommended
+> here, accepting about 39 h for the 64 runs split over two machines), `val_every_env_steps = 12,000` (25 points), `val_n_episodes = 20`,
+> `TARGET_CONSECUTIVE = 3` for both levels and `strong` = crash rate <= 0.4 and mean speed >= 25.5 m/s. The text below is the
+> unchanged calibration-time interpretation; "nothing was changed" refers to the state when this report was written.
 
 ### Summary
 

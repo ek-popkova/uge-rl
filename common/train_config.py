@@ -86,9 +86,17 @@ class TrainBudget(_ConfigBase):
     All counts are in environment steps (transitions, summed over vectorized envs).
     """
 
-    total_env_steps: int = _ph(100_000)  # PLACEHOLDER: decide before training
-    val_every_env_steps: int = _ph(5_000)  # PLACEHOLDER: decide before training
-    val_n_episodes: int = _ph(20)  # PLACEHOLDER: decide before training (<= len(VAL_SEEDS))
+    # DECIDED after the SB3 calibration (docs/calibration.md section 6, docs/config_decisions.md "Values frozen after the
+    # calibration"). Fixed before the main grid; a change after it started is reported as a deviation.
+    # 300,000: 8 of the 10 calibration runs (200k each) had not plateaued by the end of their budget and the plateau rule
+    # gives 300k; the team accepted the cost (about 39 h on one machine for the 64 runs, split over two machines).
+    # Must be a multiple of the PPO rollout size n_envs * n_steps (check_budget_matches_rollout).
+    total_env_steps: int = 300_000
+    # 12,000: 25 points per learning curve at 300k (the calibration proposed 25 points; 8,000 was computed for 200k).
+    # Must also be a multiple of the PPO rollout size, otherwise PPO validates at shifted steps.
+    val_every_env_steps: int = 12_000
+    # 20 = all VAL_SEEDS: 50 episodes would need 30 new seeds, a re-derived `beats_idle` and about 4 h more machine time.
+    val_n_episodes: int = 20  # <= len(VAL_SEEDS)
     # Resume checkpoint interval: an engineering setting that does not affect any result (at most this much work is lost
     # after a crash). Decided: about 10 min of wall time per checkpoint. Assumption: 12-17 env steps/s per process while
     # 8-12 runs train in parallel (aggregate 140 steps/s, docs/performance_analysis.md C5; network updates make it a bit
@@ -230,12 +238,58 @@ class PPOConfig(_ConfigBase):
 CONFIG_CLASSES = {"ddqn": DDQNConfig, "ppo": PPOConfig}
 
 
-def check_comparable(ddqn_cfg: DDQNConfig, ppo_cfg: PPOConfig) -> None:
+def _nearest_multiples(value: int, unit: int) -> tuple[int, int]:
+    """The multiples of ``unit`` just below and just above ``value`` (the lower one is at least ``unit``)."""
+    below = max(unit, (value // unit) * unit)
+    above = ((value + unit - 1) // unit) * unit
+    return below, max(above, below)
+
+
+def _nearest_divisors(g: int, near: int) -> tuple[int, int]:
+    """The divisors of ``g`` just below and just above ``near`` (``near`` itself if it divides ``g``)."""
+    divisors = [d for d in range(1, g + 1) if g % d == 0]
+    below = max((d for d in divisors if d <= near), default=divisors[0])
+    above = min((d for d in divisors if d >= near), default=divisors[-1])
+    return below, above
+
+
+def check_budget_matches_rollout(budget: "TrainBudget", rollout_size: int, what: str = "the PPO rollout size n_envs * n_steps") -> None:
+    """``total_env_steps`` and ``val_every_env_steps`` must be multiples of the PPO rollout size ``n_envs * n_steps``.
+
+    PPO collects ``rollout_size`` transitions per update and can only stop or validate between updates. If the budget is
+    not a multiple, PPO overshoots it (or the harness refuses), and with a validation interval that is not a multiple PPO
+    validates at shifted env steps, so the two algorithms no longer get exactly the same steps and the learning curves are
+    no longer aligned. Raises ``ValueError`` that names the nearest valid budget values and the nearest valid rollout
+    sizes (the divisors of ``gcd(total_env_steps, val_every_env_steps)``).
+    """
+    if rollout_size <= 0:
+        raise ValueError(f"{what} must be positive, got {rollout_size}")
+    problems = []
+    for name in ("total_env_steps", "val_every_env_steps"):
+        value = getattr(budget, name)
+        if value % rollout_size:
+            lo, hi = _nearest_multiples(value, rollout_size)
+            problems.append(f"{name} = {value:,} is not a multiple of {what} = {rollout_size:,} (nearest valid values: {lo:,} or {hi:,})")
+    if problems:
+        g = math.gcd(budget.total_env_steps, budget.val_every_env_steps)
+        lo, hi = _nearest_divisors(g, rollout_size)
+        raise ValueError(
+            "; ".join(problems) + f". Alternatively choose n_envs * n_steps that divides both {budget.total_env_steps:,} and "
+            f"{budget.val_every_env_steps:,}, i.e. a divisor of {g:,} (nearest to {rollout_size:,}: {lo:,} or {hi:,}) so that "
+            "both algorithms train for exactly the same number of env steps and validate at the same steps"
+        )
+
+
+def check_comparable(ddqn_cfg: DDQNConfig, ppo_cfg: PPOConfig, budget: Optional["TrainBudget"] = None) -> None:
     """Both algorithms must share gamma, network size, activation, observation handling and device.
 
     Raises ``ValueError`` naming the first field that differs. DDQN Q-network = PPO actor; the PPO critic is an extra
-    network of the same size, so only ``hidden_sizes`` is compared.
+    network of the same size, so only ``hidden_sizes`` is compared. With ``budget`` the budget must also fit the PPO
+    rollout size (``check_budget_matches_rollout``): both algorithms then train for exactly ``total_env_steps`` env steps
+    and validate at the same env steps.
     """
+    if budget is not None:
+        check_budget_matches_rollout(budget, ppo_cfg.rollout_size)
     if ddqn_cfg.gamma != ppo_cfg.gamma:
         raise ValueError(f"gamma differs: DDQN {ddqn_cfg.gamma} vs PPO {ppo_cfg.gamma} (the protocol fixes one gamma)")
     if tuple(ddqn_cfg.hidden_sizes) != tuple(ppo_cfg.hidden_sizes):

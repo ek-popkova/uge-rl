@@ -92,24 +92,31 @@ MIN_GAMMA = 0.99
 #   (24.756398...). The level is strictly better than idle on both metrics: crash rate below 0.60 and mean speed above
 #   24.8 m/s, idle's speed rounded UP to 0.1 m/s (so slightly stricter than "faster than idle"). The weak level: the agent
 #   has learned something over the default policy. Re-derive it only if VAL_SEEDS or the env change.
-# "strong": PLACEHOLDER, decide before training (after the pilot runs): crash rate <= 0.2 (far below idle) and mean
-#   speed >= 25.5 m/s (above idle, far above slower): driving fast AND safely, i.e. avoiding slow traffic ahead by
-#   changing lanes, not by braking. May turn out unreachable.
+# "strong": DECIDED by the team after the SB3 calibration (docs/calibration.md section 6, docs/config_decisions.md "Values
+#   frozen after the calibration"): crash rate <= 0.4 (below idle's 0.6 by a clear margin) and mean speed >= 25.5 m/s (above
+#   idle, far above slower): driving fast and not crashing in most episodes, i.e. avoiding slow traffic ahead by changing
+#   lanes, not by braking. The calibration runs showed that the earlier placeholder (crash rate <= 0.2) was reached by 1 of 10
+#   runs at TARGET_CONSECUTIVE = 1 and by none at 2 or 3, and that 0.4 / 25.5 is the only candidate reached by more than one
+#   run at k = 3 (2 of 10, both DQN). It stays unreachable for every scripted baseline (slower: speed 20.0 m/s; idle: crash rate
+#   0.6; random 0.70; faster 1.00), checked by the slow test. `beats_idle` stays as the fallback if a level is NaN for a model.
 TARGET_PERFORMANCE: dict[str, list[dict[str, Any]]] = {
     "beats_idle": [
         {"metric": "crash_rate", "operator": "<", "value": 0.6},  # safety: idle 0.6 on VAL_SEEDS
         {"metric": "mean_speed", "operator": ">", "value": 24.8},  # efficiency [m/s]: idle 24.7564 on VAL_SEEDS, rounded up
     ],
-    "strong": [  # PLACEHOLDER: decide before training
-        {"metric": "crash_rate", "operator": "<=", "value": 0.2},  # safety
+    "strong": [  # decided after the calibration (see above)
+        {"metric": "crash_rate", "operator": "<=", "value": 0.4},  # safety
         {"metric": "mean_speed", "operator": ">=", "value": 25.5},  # efficiency [m/s]
     ],
 }
 
 # A level counts as reached at the FIRST of TARGET_CONSECUTIVE consecutive validation points at which all its
-# conditions hold. Validation uses 20 episodes, so crash_rate moves in steps of 0.05 and a single lucky point
-# must not count. PLACEHOLDER: decide before training; fixed before training like the levels.
-TARGET_CONSECUTIVE = 2  # PLACEHOLDER: decide before training
+# conditions hold; it applies to BOTH levels. Validation uses 20 episodes, so crash_rate moves in steps of 0.05 and a single
+# lucky point must not count. DECIDED after the SB3 calibration (docs/calibration.md section 4): the chance that a policy
+# whose true crash rate is 10 points worse than a bound still passes it by luck at k consecutive points (20 episodes) is
+# about 25% / 6% / 1.5% at k = 1 / 2 / 3; with k = 1 the `beats_idle` level was reached by transient lucky points at
+# 10,000 steps. Fixed before training like the levels.
+TARGET_CONSECUTIVE = 3
 
 
 def indifference_point(w_speed: float, w_right: float, w_collision: float, T: int = 30) -> float | None:

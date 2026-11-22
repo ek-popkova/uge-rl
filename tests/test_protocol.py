@@ -67,9 +67,8 @@ def test_shared_decisions_are_frozen_and_equal_for_both_algorithms():
         names = {n.split(".")[1] for n in placeholders_in_use(cls())}
         assert not names & {"gamma", "hidden_sizes", "activation", "obs_flatten", "ppo_shared_trunk", "device"}
         assert {"lr", "max_grad_norm"} <= names
-    # the shared open items of the budget; checkpoint_every_env_steps is an engineering setting, decided
-    assert {n.split(".")[1] for n in placeholders_in_use(TrainBudget())} == {
-        "total_env_steps", "val_every_env_steps", "val_n_episodes"}
+    # the budget is frozen after the calibration (tests/test_frozen_values.py); only algorithm-specific values are placeholders
+    assert placeholders_in_use(TrainBudget()) == []
     assert TrainBudget().checkpoint_every_env_steps == 10_000
 
 
@@ -275,7 +274,7 @@ def test_values_are_resolved_relative_to_the_base_config():
 
 
 def test_grid_stays_valid_for_several_bases_and_budgets():
-    budgets = [TrainBudget(total_env_steps=n) for n in (100_000, 150_000, 200_000)]
+    budgets = [TrainBudget(total_env_steps=n) for n in (100_000, 150_000, 200_000, 300_000)]
     for eps_base, (low, high) in {0.3: (0.1, 0.5), 0.5: (0.3, 0.7)}.items():
         runs = expand_sensitivity_grid({"ddqn": DDQNConfig(eps_decay_fraction=eps_base)})
         fractions = sorted({r.overrides["eps_decay_fraction"] for r in runs if r.param == "eps_decay_fraction"})
@@ -309,7 +308,7 @@ def test_grid_raises_instead_of_clipping_when_a_value_falls_outside():
 def test_eps_decay_fraction_is_resolved_to_absolute_steps():
     cfg = DDQNConfig()
     assert cfg.eps_decay_fraction == 0.3 and "eps_decay_fraction" in cfg.placeholder_fields()
-    assert [cfg.eps_decay_steps(n) for n in (100_000, 150_000, 200_000)] == [30_000, 45_000, 60_000]
+    assert [cfg.eps_decay_steps(n) for n in (100_000, 150_000, 200_000, 300_000)] == [30_000, 45_000, 60_000, 90_000]
     assert DDQNConfig(eps_decay_fraction=1e-9).eps_decay_steps(1000) == 1  # never 0
     assert resolve_hyperparameters(cfg, TrainBudget(total_env_steps=200_000)) == {"eps_decay_steps": 60_000}
     assert resolve_hyperparameters(PPOConfig(), TrainBudget()) == {"rollout_size": 1000}

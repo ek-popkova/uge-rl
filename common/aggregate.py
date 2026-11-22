@@ -26,7 +26,9 @@ Training curves (``val_log.csv``, one file per run): ``steps_to_threshold`` (env
 wall time until each pre-registered level of ``TARGET_PERFORMANCE`` holds at ``TARGET_CONSECUTIVE`` validation points in a row), ``learning_curve_table``
 (mean and 95% t-interval over seeds per validation point) and ``curve_auc`` /
 ``auc_across_seeds`` (area under the learning curve). Points are aligned across seeds by validation
-index, not by env step (PPO's validation steps differ slightly between runs).
+index, not by env step (PPO's validation steps differ slightly between runs). ``steps_to_plateau`` is a post-hoc
+measure of how fast a run learns (never used to stop training). ``cost_per_model`` / ``cost_across_seeds`` put the steps to
+the targets and to the plateau next to the wall-time columns; wall times are grouped by machine and never pooled across machines.
 """
 
 from __future__ import annotations
@@ -230,6 +232,88 @@ def steps_to_threshold(
     return _first_run_of_holds(val_log, conditions, consecutive)
 
 
+# ---------------------------------------------------------------------------------------------
+# Steps to plateau: post-hoc, computed from the validation curve, NEVER used to stop a training run
+# ---------------------------------------------------------------------------------------------
+# PRE-REGISTERED constants (docs/evaluation_protocol.md sections 7 and 10): fixed before the main grid, not to be changed
+# after seeing results. Every run trains for the full budget; "how fast an algorithm learns" is read from the curve afterwards.
+PLATEAU_WINDOW = 5  # validation points averaged per smoothed value
+PLATEAU_TOL = 0.10  # half-width of the band around the final level, as a fraction of the IMPROVEMENT (not of the return)
+PLATEAU_TAIL_FRACTION = 0.2  # final level = mean of the raw metric over the last 20% of the validation points
+
+
+def steps_to_plateau(
+    val_log: pd.DataFrame,
+    metric: str = "return_own",
+    reward: Optional[str] = None,
+    window: int = PLATEAU_WINDOW,
+    tol: float = PLATEAU_TOL,
+) -> dict[str, Any]:
+    """Env steps (and training wall time) at which the learning curve of one run has settled at its final level.
+
+    Definition (pre-registered; higher metric values are better):
+
+    * ``final`` = mean of the RAW metric over the last ``PLATEAU_TAIL_FRACTION`` (20%) of the validation points (at least
+      one); ``improvement`` = ``final`` minus the first validation value. If ``improvement <= 0`` the run did not learn:
+      the result is NaN with ``censored = True``.
+    * Smoothing: the rolling mean over ``window`` validation points, taken over the window that STARTS at the point being
+      tested (points i .. i + window - 1; only complete windows, so there are ``n - window + 1`` smoothed values). A window
+      that starts at the point puts a clean step exactly at the step; a trailing mean would report it ``window - 1`` points
+      too late, a bias of tens of thousands of env steps that is as large as the effect being measured.
+    * The plateau point is the EARLIEST validation point i such that the smoothed value stays within
+      ``tol * improvement`` of ``final`` for every point from i to the last complete window. The band is relative to the
+      improvement, not to the return: a fixed 5% of the return was smaller than the validation noise of DQN in the
+      calibration. A noisy curve can have no such point (the last smoothed value itself leaves the band): NaN, censored.
+    * ``censored`` is True if the plateau point lies inside the last 20% of the validation points (the run may not have
+      converged within its budget) and in every NaN case. Report censored runs as such; do not drop them silently.
+
+    ``metric="return_own"`` uses the return under the run's own training reward (``reward``, column ``return_<reward>``);
+    any other value is a column name of ``val_log``. Returns ``env_step``, ``train_wall_s`` (without validation time) and
+    ``val_idx`` of the plateau point, ``censored``, ``final_level`` and ``improvement``.
+    """
+    if window < 1 or tol <= 0:
+        raise ValueError("window must be >= 1 and tol > 0")
+    if metric == "return_own":
+        if reward is None:
+            raise ValueError("metric 'return_own' needs reward= (the preset the run was trained with)")
+        column = f"return_{reward}"
+    else:
+        column = metric
+    if column not in val_log:
+        raise ValueError(f"val_log has no column {column!r}")
+    log = val_log.sort_values("env_step", kind="stable").reset_index(drop=True)
+    y = log[column].to_numpy(dtype=float)
+    n = len(y)
+    none = {"env_step": math.nan, "train_wall_s": math.nan, "val_idx": math.nan, "censored": True,
+            "final_level": math.nan, "improvement": math.nan}
+    if n < max(window, 2) or np.isnan(y).any():
+        return none
+    n_tail = max(1, math.ceil(PLATEAU_TAIL_FRACTION * n - 1e-9))
+    final = float(y[-n_tail:].mean())
+    improvement = final - float(y[0])
+    none.update(final_level=final, improvement=improvement)
+    if improvement <= 0:
+        return none
+    smooth = np.convolve(y, np.ones(window) / window, mode="valid")  # smooth[i] = mean(y[i : i + window])
+    inside = np.abs(smooth - final) <= tol * improvement + 1e-12
+    idx = -1
+    for i in range(len(smooth) - 1, -1, -1):  # walk back while the band keeps holding
+        if not inside[i]:
+            break
+        idx = i
+    if idx < 0:
+        return none
+    row = log.iloc[idx]
+    return {
+        "env_step": float(row["env_step"]),
+        "train_wall_s": float(row["train_wall_s"]) if "train_wall_s" in log else math.nan,
+        "val_idx": float(row["val_idx"]) if "val_idx" in log else float(idx),
+        "censored": bool(idx >= n - n_tail),
+        "final_level": final,
+        "improvement": improvement,
+    }
+
+
 def _as_log_list(val_logs: Union[Mapping[Any, pd.DataFrame], Sequence[pd.DataFrame]]) -> list[pd.DataFrame]:
     return list(val_logs.values()) if isinstance(val_logs, Mapping) else list(val_logs)
 
@@ -313,6 +397,113 @@ def auc_across_seeds(
         "ci_high": hi,
         "n_seeds": int(valid.sum()),
     }
+
+
+# ---------------------------------------------------------------------------------------------
+# Computational cost per model and across seeds; wall-time columns are NEVER pooled across machines
+# ---------------------------------------------------------------------------------------------
+# The main grid and the sensitivity runs are split over two computers by training seed (docs/evaluation_protocol.md section 11).
+# Env steps to a target / to the plateau do not depend on the hardware and are pooled over all machines. Everything measured in
+# seconds (training wall time, steps/s, update time, inference time) depends on the machine, so those columns are grouped by
+# the machine identifier (``run_meta.json`` reproducibility.hostname) and a mean is never taken across machines.
+COST_KEYS = ["algorithm", "train_reward", "variant", "train_seed"]
+COST_GROUP_KEYS = ["algorithm", "train_reward", "variant"]
+ALL_MACHINES = "all"  # machine label of the hardware-independent rows of ``cost_across_seeds``
+
+
+def hardware_independent_columns(levels: Sequence[str]) -> list[str]:
+    return [f"steps_to_{level}" for level in levels] + ["steps_to_plateau"]
+
+
+def wall_time_columns(levels: Sequence[str]) -> list[str]:
+    return ([f"wall_s_to_{level}" for level in levels]
+            + ["wall_s_to_plateau", "train_steps_per_s", "train_wall_s_total", "update_time_s_per_env_step", "inference_median_ms"])
+
+
+def machine_of(meta: Mapping[str, Any]) -> str:
+    """Machine identifier of a run (hostname); ``"unknown"`` for runs that did not record one."""
+    repro = meta.get("reproducibility") or {}
+    return str(repro.get("hostname") or "unknown")
+
+
+def cost_per_model(runs: Mapping[tuple, tuple[pd.DataFrame, Mapping[str, Any]]]) -> pd.DataFrame:
+    """Level 1 of the cost comparison: one row per model.
+
+    ``runs`` maps ``(algorithm, train_reward, variant, train_seed)`` to ``(val_log, run_meta)`` (``load_cost_inputs``).
+    Columns: the keys, ``machine``; the hardware-independent ``steps_to_<level>`` for every level of ``TARGET_PERFORMANCE``
+    and ``steps_to_plateau`` (+ ``plateau_censored``, ``plateau_final_level``); the machine-dependent ``wall_s_to_<level>``,
+    ``wall_s_to_plateau``, ``train_steps_per_s``, ``train_wall_s_total`` (training wall time without validation, last
+    validation point), ``update_time_s_per_env_step`` and ``inference_median_ms``.
+    """
+    rows = []
+    for key, (val_log, meta) in sorted(runs.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+        row = dict(zip(COST_KEYS, key))
+        row["machine"] = machine_of(meta)
+        reached = steps_to_threshold(val_log)
+        for level, r in reached.items():
+            row[f"steps_to_{level}"], row[f"wall_s_to_{level}"] = r["env_step"], r["train_wall_s"]
+        plateau = steps_to_plateau(val_log, "return_own", reward=row["train_reward"])
+        row["steps_to_plateau"], row["wall_s_to_plateau"] = plateau["env_step"], plateau["train_wall_s"]
+        row["plateau_censored"], row["plateau_final_level"] = plateau["censored"], plateau["final_level"]
+        timing = meta.get("timing") or {}
+        final_step = float(timing.get("final_env_step") or math.nan)
+        row["train_steps_per_s"] = float(timing.get("train_steps_per_s") or math.nan)
+        row["train_wall_s_total"] = float(val_log["train_wall_s"].iloc[-1]) if "train_wall_s" in val_log and len(val_log) else math.nan
+        row["update_time_s_per_env_step"] = float(timing.get("update_time_s") or math.nan) / final_step
+        row["inference_median_ms"] = float((meta.get("inference") or {}).get("median_ms", math.nan))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _summary_row(group: pd.DataFrame, metric: str, key: Mapping[str, Any], machine: str) -> dict[str, Any]:
+    vals = group[metric].to_numpy(dtype=float)
+    valid = ~np.isnan(vals)
+    lo, hi = t_interval(vals)
+    return {
+        **key, "machine": machine, "metric": metric,
+        "mean": float(vals[valid].mean()) if valid.any() else math.nan, "ci_low": lo, "ci_high": hi,
+        "n_seeds": int(valid.sum()),  # seeds that reached it (NaN = never reached / not measured)
+        "n_runs": int(len(vals)),
+        "n_censored": int(group.loc[valid, "plateau_censored"].astype(bool).sum()) if metric.endswith("plateau") else 0,
+    }
+
+
+def cost_across_seeds(per_model: pd.DataFrame, levels: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    """Level 2 of the cost comparison: mean over seeds and 95% t-interval, NaN-aware.
+
+    ``mean``, ``ci_low`` and ``ci_high`` use the seeds that have a value; ``n_seeds`` is their number (the seeds that
+    reached the target / plateau), ``n_runs`` the number of runs of the group, ``n_censored`` (plateau only) how many of
+    the counted plateau points lie in the last 20% of the curve. Hardware-independent metrics (env steps) are summarized
+    over all runs of (algorithm, train_reward, variant) with ``machine = "all"``; wall-time metrics once PER MACHINE, never
+    pooled across machines (a group with a single run has no interval).
+    """
+    levels = list(TARGET_PERFORMANCE) if levels is None else list(levels)
+    rows = []
+    for key, group in per_model.groupby(COST_GROUP_KEYS, sort=True):
+        keyd = dict(zip(COST_GROUP_KEYS, key))
+        for metric in hardware_independent_columns(levels):
+            rows.append(_summary_row(group, metric, keyd, ALL_MACHINES))
+        for machine, mgroup in group.groupby("machine", sort=True):
+            for metric in wall_time_columns(levels):
+                rows.append(_summary_row(mgroup, metric, keyd, str(machine)))
+    return pd.DataFrame(rows)
+
+
+def load_cost_inputs(root: Path = RESULTS_DIR, variant: str = MAIN_VARIANT) -> dict[tuple, tuple[pd.DataFrame, dict]]:
+    """``{(algorithm, train_reward, variant, train_seed): (val_log, run_meta)}`` of every FINISHED run of ``variant``
+    under ``<root>/runs`` (input of ``cost_per_model``). Unfinished and failed runs are skipped."""
+    from common.run_meta import read_meta
+
+    out: dict[tuple, tuple[pd.DataFrame, dict]] = {}
+    for algo in ALGORITHMS:
+        for path in sorted((Path(root) / "runs" / algo).glob(f"*/{variant}/seed*/run_meta.json")):
+            meta = read_meta(path)
+            log_path = path.with_name("val_log.csv")
+            if meta.get("status") != "finished" or not log_path.exists():
+                continue
+            reward, seed = path.parent.parent.parent.name, int(path.parent.name.removeprefix("seed"))
+            out[(algo, reward, variant, seed)] = (pd.read_csv(log_path), meta)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------

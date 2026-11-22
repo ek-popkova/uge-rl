@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from common.actions import ACTION_NAMES
-from common.aggregate import steps_to_threshold, t_quantile_975
+from common.aggregate import PLATEAU_TOL, PLATEAU_WINDOW, steps_to_plateau, steps_to_threshold, t_quantile_975
 from common.config import CALIBRATION_SEEDS, REWARDS, TARGET_CONSECUTIVE, TARGET_PERFORMANCE, TEST_CONDITIONS
 from common.metrics import add_return_columns, summarize_metrics
 from common.paths import ROOT
@@ -505,6 +505,17 @@ def resume_summary(d: Data) -> str:
             "caused by `PermissionError` on `os.replace` of `progress.json` (OneDrive / the orchestrator reading the file) in processes started before the "
             "retry fix; the PPO runs, started later, never failed. The lost work was at most one checkpoint interval per resume.\n")
 
+def main_grid_plateau_table(d: Data) -> str:
+    """The plateau rule of the main grid (``common.aggregate.steps_to_plateau``) applied to the calibration curves, for reporting only:
+    plateau env step and whether it lies inside the last 20% of the curve (censored)."""
+    rows = []
+    for (algo, reward, seed), run in sorted(d.runs.items()):
+        r = steps_to_plateau(run["val"], "return_own", reward=reward)
+        rows.append([f"{ALGO_SHORT[algo]} {reward} s{seed}", len(run["val"]), r["env_step"], "yes" if r["censored"] else "no",
+                     r["final_level"], r["improvement"]])
+    return md_table(rows, ["run", "validation points", "plateau env_step", "censored", "final level (own return)", "improvement"], nd=2)
+
+
 # ---------------------------------------------------------------------------------------------
 # plots
 # ---------------------------------------------------------------------------------------------
@@ -700,6 +711,13 @@ def build_report(d: Data, plots: list[Path]) -> str:
     A(ptab)
     unplat = [f"{ALGO_SHORT[k[0]]} {k[1]} s{k[2]}" for k, v in pinfo.items() if not v["plateaued"]]
     A("\n**Runs that have not plateaued by the end of the budget:** " + (", ".join(unplat) if unplat else "none") + ".\n")
+    A("\n### Plateau rule of the main grid applied to these curves (sanity check, reported only)\n")
+    A(f"`common.aggregate.steps_to_plateau` (post-hoc, pre-registered for the main grid): the final level is the mean of the raw own-reward return over the last 20% of "
+      f"the validation points, the improvement is the final level minus the first value, and the plateau point is the earliest point from which the rolling mean over "
+      f"{PLATEAU_WINDOW} points (the window starting at the point) stays within {PLATEAU_TOL:.0%} of the improvement of the final level. \"censored\" = the point lies "
+      "inside the last 20% of the curve, or there is no improvement / no stable plateau (n/a). These curves have 40 validation points 5,000 steps apart, so the window "
+      "spans 25,000 steps here (the main grid will have 25 points 12,000 steps apart, 60,000 steps per window). Nothing was changed because of this table.\n")
+    A(main_grid_plateau_table(d))
     A("\n### Progress at fixed budgets\n")
     A("Validation values averaged over the points within +-10,000 steps of the budget, own-reward return (crash rate and speed at 100k and over the last 20%). "
       "The last column is the share of the improvement from the first three points to the last 20% that was already made at 100k.\n")

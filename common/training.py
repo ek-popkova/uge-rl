@@ -83,6 +83,7 @@ from common.train_config import (  # noqa: E402
     SENSITIVITY_GRID,
     TrainBudget,
     apply_overrides,
+    check_budget_matches_rollout,
     check_run_roles,
     check_sensitivity_run,
     parse_set_args,
@@ -96,6 +97,16 @@ from common.train_logging import LOG_FILES, Timers, TrainLogger  # noqa: E402
 DEFAULT_UPDATE_LOG_EVERY = {"ddqn": 100, "ppo": 1}  # K gradient-update calls per update_log.csv row
 ASSUMED_SPEEDUP_CAP = 4.0  # parallel scaling plateaus at about 3.5-5x here (docs/performance_analysis.md C5)
 CHECKPOINT_FORMAT = 1
+
+
+ONEDRIVE_WARNING = (
+    "\n" + "!" * 100 + "\n"
+    "WARNING: the project or the output directory is inside a OneDrive folder. During the SB3 calibration, OneDrive\n"
+    "locking files while syncing crashed 6 runs with PermissionError, and a resumed run is not bit-identical to an\n"
+    "uninterrupted one. The run goes on (run_meta.json: reproducibility.onedrive_path = true), but before long runs\n"
+    "move the project out of OneDrive (or pause sync) and disable sleep.\n"
+    + "!" * 100 + "\n"
+)
 
 
 class SimulatedInterrupt(Exception):
@@ -264,6 +275,24 @@ class RunSetup:
         }
 
 
+def check_budget_fits_trainer(algo: str, cfg: Any, budget: TrainBudget, debug_budget: bool) -> None:
+    """PPO updates in rollouts of ``n_envs * n_steps`` env steps: the budget must fit (``check_budget_matches_rollout``).
+
+    ``total_env_steps`` must always be a multiple, so that both algorithms train for exactly the same number of env steps.
+    ``val_every_env_steps`` must be a multiple too for every run that uses the frozen budget; a debug / test budget
+    (``--total-steps`` ... overrides, never used for results) may validate at the next rollout boundary instead.
+    """
+    if algo != "ppo":
+        return
+    if not debug_budget:
+        check_budget_matches_rollout(budget, cfg.rollout_size)
+    elif budget.total_env_steps % cfg.rollout_size:
+        raise ValueError(
+            f"total_env_steps {budget.total_env_steps} must be a multiple of the rollout size {cfg.rollout_size} "
+            f"(n_envs * n_steps) so that both algorithms train for exactly the same number of env steps"
+        )
+
+
 def resolve_setup(algo: str, argv: Optional[Sequence[str]] = None) -> RunSetup:
     """Parse the CLI and build the validated config / budget (raises on invalid values)."""
     args = build_parser(algo).parse_args(argv)
@@ -283,12 +312,7 @@ def resolve_setup(algo: str, argv: Optional[Sequence[str]] = None) -> RunSetup:
             raise ValueError("--variant main with --set overrides would overwrite the main run; pick another name")
     else:
         variant = variant_name(overrides)
-    granularity = cfg.rollout_size if algo == "ppo" else 1
-    if budget.total_env_steps % granularity:
-        raise ValueError(
-            f"total_env_steps {budget.total_env_steps} must be a multiple of the rollout size {granularity} "
-            f"(n_envs * n_steps) so that both algorithms train for exactly the same number of env steps"
-        )
+    check_budget_fits_trainer(algo, cfg, budget, debug_budget=bool(budget_kw))
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
     # tuning runs (tune-<name>) and the reserved run seed 99 stay apart from every result run
@@ -382,6 +406,7 @@ class TrainingRun:
         """Run (or resume) the training; returns the run directory. Writes run_meta.json in every case."""
         s = self.setup
         self.trainer_cls.check_available()  # stubs raise NotImplementedError before anything is written
+        check_budget_fits_trainer(s.algo, s.cfg, s.budget, debug_budget=bool(s.budget_overrides))
         limit_threads()
         torch.set_num_threads(1)
         rdir = s.run_dir
@@ -405,7 +430,9 @@ class TrainingRun:
             s.cfg, s.budget, overridden=[*s.overridden_keys, *s.budget_overrides]
         )
         meta["logging"]["update_log_every"] = s.update_log_every
-        meta["reproducibility"] = reproducibility_info(s.cfg.device, s.workers)
+        meta["reproducibility"] = reproducibility_info(s.cfg.device, s.workers, s.root)
+        if meta["reproducibility"]["onedrive_path"]:
+            print(ONEDRIVE_WARNING, file=sys.stderr, flush=True)
         if meta["placeholders_in_use"]:
             print("WARNING: undecided PLACEHOLDER values in use: " + ", ".join(meta["placeholders_in_use"]),
                   file=sys.stderr, flush=True)

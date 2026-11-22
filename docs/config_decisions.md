@@ -102,29 +102,28 @@ and metrics: `docs/evaluation_protocol.md`.
 Used by `common.aggregate.steps_to_threshold` for "env steps to target performance" in the cost comparison. Behavioural
 metrics only, so the levels are comparable across reward presets. Two **pre-registered, named levels**, both reported for
 every run, fixed before any training run and not changed after seeing results (`docs/evaluation_protocol.md` sections 7
-and 10). `beats_idle` is decided (derived from the idle baseline, no team decision needed); `strong` and `TARGET_CONSECUTIVE` are
-**placeholders, decided after the pilot runs**.
+and 10). `beats_idle` is decided (derived from the idle baseline, no team decision needed); `strong` and `TARGET_CONSECUTIVE` were
+decided by the team after the SB3 calibration (section "Values frozen after the calibration" below).
 
 | Parameter | Value | Meaning |
 |---|---|---|
 | `TARGET_PERFORMANCE["beats_idle"]` (decided) | `crash_rate < 0.6` and `mean_speed > 24.8` | strictly better than `idle` on both metrics on `VAL_SEEDS`: the agent has learned something over the default policy. Source: `idle` through `validate` on all 20 `VAL_SEEDS` gives crash rate 0.6 exactly and mean speed 24.7564 m/s; 24.8 is that speed rounded up to 0.1 m/s (slightly stricter than "faster than idle"). Re-derive only if `VAL_SEEDS` or the env change |
-| `TARGET_PERFORMANCE["strong"]` (placeholder) | `crash_rate <= 0.2` and `mean_speed >= 25.5` | driving fast and safely; may turn out unreachable, in which case `beats_idle` still allows a comparison |
-| `TARGET_CONSECUTIVE` (placeholder) | 2 | a level is reached at the first of this many consecutive validation points at which all its conditions hold (20 validation episodes: crash rate moves in steps of 0.05, one lucky point must not count) |
+| `TARGET_PERFORMANCE["strong"]` (decided after the calibration) | `crash_rate <= 0.4` and `mean_speed >= 25.5` | driving fast without crashing in most episodes; unreachable for every scripted baseline; `beats_idle` stays the fallback if a model never reaches it (the earlier placeholder `crash_rate <= 0.2` was reached by 1 of 10 calibration runs at `TARGET_CONSECUTIVE = 1` and by none at 2 or 3) |
+| `TARGET_CONSECUTIVE` (decided after the calibration) | 3, for both levels | a level is reached at the first of this many consecutive validation points at which all its conditions hold (20 validation episodes: crash rate moves in steps of 0.05, one lucky point must not count) |
 
 Each level is joint and must stay unreachable for the scripted baselines: `slower` has a 0% crash rate at 20 m/s, so a
 crash bound alone would reward braking; `idle` crashes in 71% of the episodes at 24.7 m/s (`docs/evaluation_protocol.md`
 section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.24, idle 0.60 / 24.76, slower 0.00 / 20.03,
 faster 1.00 / 28.90 m/s; `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` checks both levels. The
-open budget items (`total_env_steps`, validation interval and episodes) and the algorithm-specific hyperparameters (`common/train_config.py`) are placeholders too.
+budget (`total_env_steps`, validation interval and episodes) is frozen as well (below); only the algorithm-specific hyperparameters (`common/train_config.py`) are placeholders.
 
 ## Shared training decisions
 
 Agreed by the team and identical for DDQN and PPO; code: `common/train_config.py`, `common/networks.py`, `common/config.py`
 (tuning and sensitivity constants), `common/aggregate.py`. **These may only change by team agreement. A change after the main
-grid has started is reported as a deviation** (`docs/evaluation_protocol.md` section 10). Everything not listed here is still
-a placeholder (`CLAUDE.md`, "TO DECIDE BEFORE TRAINING"). The only shared open items are `total_env_steps`,
-`val_every_env_steps`, `val_n_episodes`, `TARGET_PERFORMANCE["strong"]` and `TARGET_CONSECUTIVE`; everything else that is still a
-placeholder is an algorithm-specific hyperparameter and stays with its owner.
+grid has started is reported as a deviation** (`docs/evaluation_protocol.md` section 10). The budget and the target values were frozen after
+the SB3 calibration (next section); no shared item is open any more. Everything else that is still a placeholder
+(`CLAUDE.md`, "TO DECIDE BEFORE TRAINING") is an algorithm-specific hyperparameter and stays with its owner.
 
 | Decision | Value | Justification |
 |---|---|---|
@@ -146,21 +145,78 @@ placeholder is an algorithm-specific hyperparameter and stays with its owner.
 
 ### Sensitivity runs for the current placeholder bases
 
-The absolute values depend on the frozen base values and on `total_env_steps` (here the placeholders: DDQN lr 5e-4,
-`eps_decay_fraction` 0.3, PPO lr 3e-4, `clip_range` 0.2, `total_env_steps` 100,000); `expand_sensitivity_grid()` recomputes them. Every
+The absolute values depend on the base values and on `total_env_steps` (here the placeholder bases DDQN lr 5e-4,
+`eps_decay_fraction` 0.3, PPO lr 3e-4, `clip_range` 0.2, and the frozen `total_env_steps` 300,000); `expand_sensitivity_grid()` recomputes them
+and `resolve_hyperparameters` resolves `eps_decay_fraction` to env steps (the base 0.3 is 90,000 steps; tested in `tests/test_frozen_values.py`). Every
 setting runs with seeds 0, 1, 2 (reward `balanced`, density `medium`), 3 runs per setting; the base setting is the main-grid run.
 
 | Algorithm | Parameter | Grid | Resolved value | Variant directory | Runs |
 |---|---|---|---|---|---:|
 | DDQN | `lr` | base x1/3 | 0.000166667 | `lr=0.000166667` | 3 |
 | DDQN | `lr` | base x3 | 0.0015 | `lr=0.0015` | 3 |
-| DDQN | `eps_decay_fraction` | base -0.2 | 0.1 (10,000 steps) | `eps_decay_fraction=0.1` | 3 |
-| DDQN | `eps_decay_fraction` | base +0.2 | 0.5 (50,000 steps) | `eps_decay_fraction=0.5` | 3 |
+| DDQN | `eps_decay_fraction` | base -0.2 | 0.1 (30,000 steps) | `eps_decay_fraction=0.1` | 3 |
+| DDQN | `eps_decay_fraction` | base +0.2 | 0.5 (150,000 steps) | `eps_decay_fraction=0.5` | 3 |
 | PPO | `lr` | base x1/3 | 0.0001 | `lr=0.0001` | 3 |
 | PPO | `lr` | base x3 | 0.0009 | `lr=0.0009` | 3 |
 | PPO | `clip_range` | base -0.1 | 0.1 | `clip_range=0.1` | 3 |
 | PPO | `clip_range` | base +0.1 | 0.3 | `clip_range=0.3` | 3 |
 | | | | | **total** | **24** |
+
+## Values frozen after the calibration
+
+Decided by the team after the SB3 calibration (`docs/calibration.md`, in particular sections 4 and 6; plots and per-run
+`val_log.csv` / `run_meta.json` in `docs/calibration_evidence/`). The calibration trained SB3 DQN (vanilla, not Double DQN) and SB3 PPO
+for 200,000 steps in the project env and was never part of the DDQN vs PPO comparison. Its report only proposed values; the team
+accepted them with one change, the budget (300,000 instead of the recommended 200,000). The values are now plain defaults in
+`common/train_config.py` and `common/config.py` (no PLACEHOLDER marker) and may only change by team agreement; a change after the main
+grid has started is reported as a deviation (`docs/evaluation_protocol.md` section 10).
+
+| Value | Frozen as | Justification |
+|---|---|---|
+| `TrainBudget.total_env_steps` | 300,000 | 8 of the 10 calibration runs had not plateaued by 200k and the plateau rule gives 300k (the calibration itself recommended 200k because that figure is censored by the budget: it is a lower bound). The team accepted the cost: 64 runs (40 main + 24 sensitivity) x 315,000 simulated steps = 20.2 M, about 39 h on one machine at the measured 143 steps/s, about 20 h per machine on two |
+| `TrainBudget.val_every_env_steps` | 12,000 | 25 points per learning curve at 300k (the calibration proposed 25 points; its 8,000 was computed for a 200k budget). Validation costs 25 x 20 x 30 = 15,000 steps per run, 5% of the training steps |
+| `TrainBudget.val_n_episodes` | 20 | all `VAL_SEEDS`. 50 episodes would need 30 new seed values, a re-derived `beats_idle` (its constants come from the idle baseline on these 20 seeds) and about 4 h more machine time |
+| `TARGET_CONSECUTIVE` | 3, for both levels | the chance that a policy 10 points worse than the bound passes it by luck at `k` consecutive points of 20 episodes is about 25% / 6% / 1.5% at `k` = 1 / 2 / 3. At `k` = 1 `beats_idle` was reached by transient lucky points at 10,000 steps |
+| `TARGET_PERFORMANCE["strong"]` | `crash_rate <= 0.4` and `mean_speed >= 25.5` | the only candidate level that more than one calibration run reached at `k` = 3 (2 of 10, both DQN); unreachable for every scripted baseline (slower 20.0 m/s, idle crash rate 0.6, random 0.70, faster 1.00 on `VAL_SEEDS`); `beats_idle` stays the fallback. Reward `safety` agents cannot reach a speed bound by design, so steps to target are reported per reward |
+
+The tuning runs (seed 99, `tune-<name>` variants, default budget only) therefore also train for 300,000 steps, so their curves match
+the main grid; `check_run_roles` still refuses budget overrides in a tuning run. The sensitivity runs use the default budget and
+their base points are the main-grid runs; the 24 runs and the epsilon schedule resolved for 300,000 steps are listed above.
+
+### PPO rollout size must divide the budget
+
+PPO collects `n_envs * n_steps` transitions per update, so it can only stop or validate between updates. `total_env_steps` and
+`val_every_env_steps` must be multiples of the rollout size, otherwise PPO overshoots the budget or validates at shifted steps, and the two
+algorithms no longer get exactly the same number of env steps. `common.train_config.check_budget_matches_rollout` raises with the nearest
+valid budget values and the nearest valid rollout sizes; it is called by `check_comparable(ddqn_cfg, ppo_cfg, budget)`, by `resolve_setup`
+and at the start of `TrainingRun.run`. Since 300,000 = 25 x 12,000, the rule is: **`n_envs * n_steps` must be a divisor of 12,000**, e.g. 1,000,
+2,000, 3,000, 4,000, 6,000 or 12,000 (the SB3 calibration used 2,048, which would be refused). DDQN advances one transition at a time and
+has no such constraint. Debug and test budgets (explicit `--total-steps` ... overrides, never used for results) only need a `total_env_steps` that
+fits; they may validate at the next rollout boundary.
+
+### Post-hoc plateau metric
+
+"How fast an algorithm learns" is measured after training from the validation curve, never used to stop a run: every run trains for the
+full budget. `common.aggregate.steps_to_plateau(val_log, metric="return_own", reward, window=5, tol=0.10)` (constants `PLATEAU_WINDOW`,
+`PLATEAU_TOL`, pre-registered next to the function): the final level is the mean of the raw metric over the last 20% of the validation
+points, the improvement is the final level minus the first validation value, the curve is smoothed with a rolling mean over `window`
+points (the window that starts at the point, so a clean step is found at the step and not `window - 1` points late), and the plateau point is
+the earliest validation point from which the smoothed curve stays within `tol` x the improvement of the final level until the end. The
+band is relative to the improvement because a fixed 5% of the return was smaller than the validation noise of DQN in the calibration.
+`censored` is True if the plateau point lies in the last 20% of the curve (the run may not have converged); no improvement, or no stable
+plateau, gives NaN with `censored = True`. For `return_own` the return under the run's own training reward is used. The aggregation
+(`cost_per_model`, `cost_across_seeds`) reports it next to `steps_to_threshold`: per model, then mean and 95% t-interval over seeds,
+NaN-aware, with the number of seeds that reached it and how many of them are censored. Sanity check on the calibration curves (reporting
+only): `docs/calibration.md`, section 4.
+
+### Two machines and OneDrive
+
+The main grid and the sensitivity runs are split over two computers by training seed (for example seeds 0-2 on one, 3-4 on the other), so
+that each machine runs both algorithms and all rewards. `run_meta.json` records the hostname and the CPU model. Env steps to a target and to
+the plateau do not depend on the hardware and are the primary cost metrics; wall times, steps/s and inference time are compared only within
+one machine (`cost_across_seeds` groups them by machine and never pools them). During the calibration OneDrive locked files and 6 runs
+crashed with `PermissionError`, and resumed runs are not bit-identical; the harness warns and records `onedrive_path` if the project or output
+directory is inside OneDrive. Move the project out of OneDrive (or pause sync) and disable sleep before long runs.
 
 ## Limitations
 

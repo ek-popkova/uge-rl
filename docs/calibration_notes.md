@@ -1,6 +1,12 @@
 Written after reading sections 0-5. Everything refers to 20 `VAL_SEEDS` episodes, one seed per reward (two for balanced), SB3 reference implementations with
 no tuning. Nothing was changed in `common/config.py` or `common/train_config.py`; the items below are proposals for the team.
 
+> **Outcome (team decision after this report).** The team froze the shared values in a follow-up change
+> (`docs/config_decisions.md`, "Values frozen after the calibration"): `total_env_steps = 300,000` (instead of the 200,000 recommended
+> here, accepting about 39 h for the 64 runs split over two machines), `val_every_env_steps = 12,000` (25 points), `val_n_episodes = 20`,
+> `TARGET_CONSECUTIVE = 3` for both levels and `strong` = crash rate <= 0.4 and mean speed >= 25.5 m/s. The text below is the
+> unchanged calibration-time interpretation; "nothing was changed" refers to the state when this report was written.
+
 ### Summary
 
 | Question | Answer in one line |

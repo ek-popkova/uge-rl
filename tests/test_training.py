@@ -313,7 +313,7 @@ def test_variant_names_and_no_collision_with_main(tmp_path):
 
 def test_placeholders_are_listed_and_overrides_are_not():
     names = placeholders_in_use(DDQNConfig(), TrainBudget())
-    assert "DDQNConfig.lr" in names and "TrainBudget.total_env_steps" in names
+    assert "DDQNConfig.lr" in names and not any(n.startswith("TrainBudget.") for n in names)  # the budget is frozen
     assert "DDQNConfig.device" not in names  # decided by CLAUDE.md rule 8
     # shared decisions are plain defaults now (tests/test_protocol.py)
     for decided in ("gamma", "hidden_sizes", "activation", "obs_flatten"):
@@ -539,7 +539,7 @@ def test_steps_to_threshold_needs_every_condition_at_the_same_point():
 
 
 def test_an_isolated_passing_point_does_not_count_and_the_first_point_of_the_run_is_reported():
-    assert TARGET_CONSECUTIVE == 2
+    assert TARGET_CONSECUTIVE == 3
     strong = TARGET_PERFORMANCE["strong"]
     good = dict(crash_rate=0.1, mean_speed=26.0)
     bad = dict(crash_rate=0.5, mean_speed=24.0)
@@ -548,7 +548,12 @@ def test_an_isolated_passing_point_does_not_count_and_the_first_point_of_the_run
         env_step=[1000, 2000, 3000, 4000, 5000], train_wall_s=[10, 20, 30, 40, 50], val_idx=range(5))
     assert all(math.isnan(v) for v in steps_to_threshold(lucky, strong).values())  # default: TARGET_CONSECUTIVE points
     assert steps_to_threshold(lucky, strong, consecutive=1)["env_step"] == 3000.0  # the single point would have counted
-    # an isolated point followed later by two in a row: the reported point is the FIRST of the qualifying pair
+    # two in a row are not enough with TARGET_CONSECUTIVE = 3
+    pair = pd.DataFrame([bad, good, good, bad, bad]).assign(
+        env_step=[1000, 2000, 3000, 4000, 5000], train_wall_s=[10, 20, 30, 40, 50], val_idx=range(5))
+    assert all(math.isnan(v) for v in steps_to_threshold(pair, strong).values())
+    assert steps_to_threshold(pair, strong, consecutive=2)["env_step"] == 2000.0
+    # isolated points followed later by three in a row: the reported point is the FIRST of the qualifying run
     run = pd.DataFrame([bad, good, bad, good, good, good]).assign(
         env_step=[1000, 2000, 3000, 4000, 5000, 6000], train_wall_s=[10, 20, 30, 40, 50, 60], val_idx=range(6))
     assert steps_to_threshold(run, strong) == {"env_step": 4000.0, "train_wall_s": 40.0, "val_idx": 3.0}
@@ -556,16 +561,16 @@ def test_an_isolated_passing_point_does_not_count_and_the_first_point_of_the_run
 
 def test_steps_to_threshold_reports_both_pre_registered_levels():
     idle = dict(crash_rate=0.60, mean_speed=24.76)  # idle on VAL_SEEDS: does not beat itself
-    better = dict(crash_rate=0.40, mean_speed=25.0)  # beats idle, not strong
+    better = dict(crash_rate=0.40, mean_speed=25.0)  # beats idle; not strong (speed below 25.5)
     strong = dict(crash_rate=0.15, mean_speed=26.0)
-    log = pd.DataFrame([idle, better, better, strong, strong]).assign(
-        env_step=[1000, 2000, 3000, 4000, 5000], train_wall_s=[10, 20, 30, 40, 50], val_idx=range(5))
+    log = pd.DataFrame([idle, better, better, strong, strong, strong]).assign(
+        env_step=[1000, 2000, 3000, 4000, 5000, 6000], train_wall_s=[10, 20, 30, 40, 50, 60], val_idx=range(6))
     out = steps_to_threshold(log)  # default: TARGET_PERFORMANCE and TARGET_CONSECUTIVE
     assert set(out) == {"beats_idle", "strong"}
     assert out["beats_idle"] == {"env_step": 2000.0, "train_wall_s": 20.0, "val_idx": 1.0}
     assert out["strong"] == {"env_step": 4000.0, "train_wall_s": 40.0, "val_idx": 3.0}
     # a run that only beats idle: the strong level is NaN, the weak level still gives a number
-    weak = log.iloc[:3]
+    weak = log.iloc[:4]  # idle, better, better, strong: three points that beat idle, only one strong point
     out = steps_to_threshold(weak)
     assert out["beats_idle"]["env_step"] == 2000.0 and math.isnan(out["strong"]["env_step"])
     assert math.isnan(steps_to_threshold(log.iloc[:1])["beats_idle"]["env_step"])  # idle itself reaches neither
@@ -671,3 +676,25 @@ def test_inference_benchmark_protocol():
     assert res["median_ms"] > 0 and res["p90_ms"] >= res["median_ms"] and res["batch_size"] == 1 and res["threads"] == 1
     with pytest.raises(ValueError):
         measure_inference(make_baseline("slower"), [], n=10)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("algo", ["ddqn", "ppo"])
+def test_run_meta_records_the_machine_and_the_onedrive_flag(runs, algo):
+    from common import run_meta as rm
+
+    repro = rm.read_meta(runs[algo] / "run_meta.json")["reproducibility"]
+    assert repro["hostname"] == rm.hostname() and repro["cpu_model"]  # wall times are only compared within one machine
+    assert isinstance(repro["onedrive_path"], bool)
+
+
+@pytest.mark.slow
+def test_a_run_inside_onedrive_prints_a_prominent_warning_but_runs(tmp_path, monkeypatch, capsys):
+    from common import run_meta as rm
+
+    monkeypatch.setattr(rm, "is_onedrive_path", lambda path, environ=None: True)
+    run_dir_ = run_random(tmp_path, "ddqn")
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "OneDrive" in err and "move the project out of OneDrive" in err
+    meta = rm.read_meta(run_dir_ / "run_meta.json")
+    assert meta["status"] == "finished" and meta["reproducibility"]["onedrive_path"] is True  # not blocked, but recorded

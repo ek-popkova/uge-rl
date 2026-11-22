@@ -134,12 +134,12 @@ python -m ddqn.train --reward balanced --seed 0 --resume                   # con
 | `--resume` / `--overwrite` | continue from the last checkpoint / delete an existing run and start over (a run directory with results is otherwise refused) |
 | `--out-dir` | results root (default `results/`); the run is written to `<out-dir>/runs/<algo>/<reward>/<variant>/seed<s>/` |
 | `--total-steps`, `--val-every`, `--val-episodes`, `--checkpoint-every` | budget overrides for debugging and tests only; the main grid uses the `TrainBudget` defaults |
-| `--benchmark-steps`, `--max-minutes`, `--force` | quiet speed benchmark before the run (0 = skip), refuse to start above the estimate unless `--force` |
+| `--benchmark-steps`, `--max-minutes`, `--force` | quiet speed benchmark before the run (0 = skip), refuse to start above the estimate unless `--force`; a run with the frozen 300,000-step budget is estimated at hours, so real runs need `--force` (or a larger `--max-minutes`) |
 
 Before the first step the harness measures the simulator speed in a quiet process and prints the runtime estimate
 (simulation only; network updates are not included). The shared decisions are frozen (gamma 0.99; MLP 256x256 ReLU on the 25
 flattened observation features, built by `common/networks.py`; tuning and sensitivity protocol; milestones 10 / 25 / 50%:
-`docs/config_decisions.md`, "Shared training decisions"). `total_env_steps`, the validation settings, `TARGET_PERFORMANCE["strong"]`, `TARGET_CONSECUTIVE` and the algorithm-specific hyperparameters are still
+`docs/config_decisions.md`, "Shared training decisions"). The budget (`total_env_steps = 300,000`, `val_every_env_steps = 12,000`, `val_n_episodes = 20`), `TARGET_PERFORMANCE["strong"]` and `TARGET_CONSECUTIVE = 3` were frozen after the SB3 calibration (`docs/config_decisions.md`, "Values frozen after the calibration"); only the algorithm-specific hyperparameters are still
 **placeholders** until decided (`common/train_config.py`; list in `CLAUDE.md`, "TO DECIDE BEFORE TRAINING"); the run warns
 about every placeholder it uses.
 
