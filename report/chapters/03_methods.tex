@@ -1,0 +1,68 @@
+\section{Methods}\label{sec:methods}
+
+\subsection{Baselines}\label{sec:baseline}
+\begin{itemize}
+  \item \textbf{Random policy:} uniform over the discrete actions.
+  \item \textbf{Always-IDLE policy:} simple heuristic that keeps lane and speed. \todo{optional}
+\end{itemize}
+\todo{Why these baselines: they give the reference performance that learned policies must beat.}
+
+\subsection{Double DQN}\label{sec:ddqn}
+
+\paragraph{State of the art.}
+DQN~\cite{mnih2015dqn} approximates the action-value function with a neural network, using experience
+replay and a target network. It overestimates action values because the same network selects and evaluates
+the maximising action; Double DQN~\cite{vanhasselt2016ddqn} decouples the two. Further extensions include
+dueling architectures~\cite{wang2016dueling}, prioritised experience replay~\cite{schaul2016per} and their
+combination in Rainbow~\cite{hessel2018rainbow}.
+
+\paragraph{Our implementation.}
+The action-value function $\Q(\state, \action; \theta)$ is a neural network (\todo{architecture}). The TD target is
+\begin{equation}
+  y_t = r_t + \gam\,(1 - d_t)\,\Q\!\bigl(\state_{t+1}, \argmax_{\action'} \Q(\state_{t+1}, \action'; \theta);\, \thetat\bigr),
+  \label{eq:ddqn-target}
+\end{equation}
+where $d_t$ marks terminal transitions, and the network minimises
+\begin{equation}
+  \mathcal{L}(\theta) = \E_{(\state_t,\action_t,r_t,\state_{t+1},d_t)\sim\mathcal{D}}\bigl[\ell\bigl(y_t - \Q(\state_t, \action_t; \theta)\bigr)\bigr].
+  \label{eq:ddqn-loss}
+\end{equation}
+\todo{Loss $\ell$ (MSE/Huber), replay buffer size and sampling, target network update (hard every $N$ steps
+or soft with $\tau$), $\varepsilon$-greedy schedule, optimiser, gradient clipping.}
+
+\subsection{Proximal Policy Optimization}\label{sec:ppo}
+
+\paragraph{State of the art.}
+Policy-gradient methods start from REINFORCE~\cite{williams1992reinforce}; actor-critic methods reduce the
+variance with a learned baseline (A2C/A3C~\cite{mnih2016a3c}); TRPO~\cite{schulman2015trpo} constrains the
+policy update with a trust region, and PPO~\cite{schulman2017ppo} approximates this with a clipped objective.
+Generalised Advantage Estimation (GAE)~\cite{schulman2016gae} trades bias against variance in the advantage estimate.
+
+\paragraph{Our implementation.}
+An actor-critic network (\todo{shared or separate layers}) outputs a categorical policy $\pol_\theta(\action \mid \state)$ and a state value $V_\phi(\state)$. The policy maximises
+\begin{equation}
+  \mathcal{L}^{\mathrm{CLIP}}(\theta) =
+  \E_t\Bigl[\min\bigl(\rho_t(\theta)\hat{A}_t,\ \mathrm{clip}(\rho_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\bigr)\Bigr],
+  \quad
+  \rho_t(\theta) = \frac{\pol_\theta(\action_t \mid \state_t)}{\pol_{\theta_{\mathrm{old}}}(\action_t \mid \state_t)},
+  \label{eq:ppo-clip}
+\end{equation}
+with advantages from GAE,
+\begin{equation}
+  \hat{A}_t = \sum_{l=0}^{T-t-1} (\gam\lambda)^l \delta_{t+l},
+  \qquad
+  \delta_t = r_t + \gam V_\phi(\state_{t+1}) - V_\phi(\state_t),
+  \label{eq:gae}
+\end{equation}
+plus a value-function loss and an entropy bonus.
+\todo{Rollout length, number of epochs and minibatches, $\epsilon$, $\lambda$, entropy and value coefficients,
+advantage normalisation, optimiser.}
+
+\subsection{Value-based vs.\ policy-based learning}\label{sec:vb-vs-pb}
+\todo{Theoretical comparison, the frame for \cref{sec:res-ddqn-ppo}:}
+\begin{itemize}
+  \item \textbf{Off-policy vs.\ on-policy:} \ddqn{} reuses old transitions from a replay buffer; \ppo{} uses each batch for a few epochs and discards it.
+  \item \textbf{Sample efficiency:} expected advantage of off-policy replay.
+  \item \textbf{Stability:} sensitivity to hyper-parameters, bootstrapping and overestimation vs.\ clipped updates.
+  \item \textbf{Policy class:} deterministic greedy policy derived from $\Q$ vs.\ explicit stochastic policy.
+\end{itemize}

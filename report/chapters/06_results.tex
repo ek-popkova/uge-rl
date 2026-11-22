@@ -1,0 +1,64 @@
+\section{Results}\label{sec:results}
+
+% Figures are produced by the notebooks and saved to report/figures/ (PDF preferred), e.g.:
+%
+% \begin{figure}[H]
+%   \centering
+%   \includegraphics[width=\textwidth]{learning_curves}
+%   \caption{Learning curves (mean $\pm$ std over seeds); the dashed line is the random baseline.}
+%   \label{fig:learning-curves}
+% \end{figure}
+
+\subsection{\ddqn{} vs.\ \ppo{}}\label{sec:res-ddqn-ppo}
+\todo{Convergence speed, stability, final performance (frame from \cref{sec:vb-vs-pb}).}
+
+\subsection{Learning curves}\label{sec:res-curves}
+\todo{Return vs.\ environment steps, mean $\pm$ spread over seeds, baseline as a horizontal line.}
+
+\subsection{Driving efficiency}\label{sec:res-efficiency}
+\Cref{tab:main-results} is the template of the main comparison (metrics from \cref{sec:metrics}).
+\begin{table}[H]
+  \centering
+  \caption{Evaluation results (aggregation as in \cref{sec:stats}).}
+  \label{tab:main-results}
+  \begin{tabular}{@{}llcccc@{}}
+    \toprule
+    Algorithm & Reward & Return & Mean speed & Distance & Completion \\
+    \midrule
+    Random  & default & -- & -- & -- & -- \\
+    \ddqn{} & default & -- & -- & -- & -- \\
+    \ppo{}  & default & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\todo{Fill in the table; add safety columns in \cref{sec:res-safety}.}
+
+\subsection{Safety}\label{sec:res-safety}
+\todo{Collision rate, collision-free rate, near-collision frequency.}
+
+\subsection{Reward design}\label{sec:res-reward}
+\todo{Table ``reward $\times$ behavioural metrics'' for default, A, B, C.
+Key question: does a higher return correspond to better driving? Discuss the limits of reward-based safety.}
+
+\subsection{Traffic density}\label{sec:res-density}
+\paragraph{State of the art.}
+Generalisation of RL agents to unseen conditions is a known weakness~\cite{cobbe2019generalization,kirk2023generalisation}.
+
+\paragraph{Results.}
+\todo{Matrix ``training density $\times$ test density'' (low/medium/high) for each algorithm; generalisation to unseen densities.}
+
+\subsection{Hyper-parameter sensitivity}\label{sec:res-hp}
+\paragraph{State of the art.}
+Implementation and hyper-parameter choices strongly affect on-policy actor-critic
+methods~\cite{andrychowicz2021matters}.
+
+\paragraph{Results.}
+\todo{Effect of learning rate, $\gam$, $\varepsilon$-schedule (\ddqn{}) and clipping $\epsilon$ (\ppo{}).}
+
+\subsection{Qualitative behaviour}\label{sec:res-qualitative}
+\todo{Frames from selected episodes: lane changes, overtaking, speed adaptation; analysis of failure cases.
+Link to the video (see the appendix).}
+
+\subsection{Computational efficiency}\label{sec:res-compute}
+\todo{Env-steps to target return, gradient updates, parameter counts (hardware-independent);
+wall-clock times only with the caveat about different machines.}

@@ -1,0 +1,48 @@
+\section{Experimental Protocol}\label{sec:protocol}
+
+\subsection{Common settings}
+Both algorithms are trained under identical conditions:
+\begin{itemize}
+  \item \textbf{Training budget:} 300k environment steps per model.
+  \item \textbf{Environment:} configuration of \cref{sec:env-config}, identical for both algorithms.
+  \item \textbf{Seeds:} \todo{number of training seeds and their values}.
+  \item \textbf{Compute:} CPU cores limited to \todo{N} on both machines, so that wall-clock times are comparable at least in order of magnitude.
+\end{itemize}
+
+\subsection{Evaluation protocol}\label{sec:eval-protocol}
+\begin{itemize}
+  \item Evaluation episodes are separate from training: no parameter updates, fixed evaluation seeds shared by both algorithms (\code{EVAL\_SEEDS} in \code{common/config.py}).
+  \item Number of evaluation episodes per checkpoint: \todo{N}. Intermediate evaluation every \todo{K} training steps.
+  \item Policy at evaluation time: \todo{deterministic (greedy / mode) or stochastic}; the same rule for both algorithms.
+\end{itemize}
+
+\subsection{Metrics}\label{sec:metrics}
+\begin{itemize}
+  \item \textbf{Return:} cumulative episode reward.
+  \item \textbf{Mean speed} (m/s) and \textbf{distance travelled} per episode.
+  \item \textbf{Completion rate:} fraction of episodes without early termination.
+  \item \textbf{Collision rate:} collisions per episode; \textbf{collision-free rate:} fraction of episodes with no collision.
+  \item \textbf{Near-collision frequency:} fraction of steps in which \todo{define explicitly: time-to-collision below $\tau$ s, or distance to the nearest vehicle below $d$ m}.
+  \item \textbf{Lane-change frequency:} lane changes per episode.
+\end{itemize}
+
+\subsubsection{Hardware-independent computational cost}
+Environment steps to reach a target return, number of gradient updates, and number of network parameters.
+Wall-clock training and inference times are reported only with the caveat that they were measured on
+different machines.
+
+\subsection{Hyper-parameter selection}\label{sec:hp-selection}
+\todo{Procedure (which parameters were tuned, on which reward/density, how many seeds), search ranges,
+selection criterion. Final values for both algorithms are in \cref{app:hyperparameters}.}
+
+\subsection{Statistical methodology}\label{sec:stats}
+\paragraph{State of the art.}
+Results of deep RL depend strongly on random seeds and implementation details~\cite{henderson2018matters}.
+Reporting only mean over few runs can be misleading; robust aggregate statistics such as the interquartile
+mean with bootstrapped confidence intervals are recommended~\cite{agarwal2021rliable}.
+
+\paragraph{Our protocol.}
+\todo{State how results are aggregated across seeds (mean $\pm$ std, IQM, confidence intervals) and why.}
+
+\subsection{Experiments}
+\todo{List of experiments and how each maps to a subsection of \cref{sec:results}.}

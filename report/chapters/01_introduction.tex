@@ -1,0 +1,25 @@
+\section{Introduction}\label{sec:introduction}
+
+\subsection{Motivation}
+\todo{Driving as a sequence of decisions under uncertainty (lane changes, overtaking, speed adaptation);
+the trade-off between safety and efficiency; why RL is a natural framework.}
+
+\subsection{State of the art}\label{sec:sota-intro}
+\todo{Draft and extend.}
+\begin{itemize}
+  \item \textbf{DRL for autonomous driving:} surveyed in~\cite{kiran2022drl}. \todo{perception vs.\ decision-making, typical tasks.}
+  \item \textbf{HighwayEnv as a benchmark:} \env{HighwayEnv}~\cite{highway-env} is a standard lightweight
+        environment for tactical decision-making on highways.
+  \item \textbf{Simulation-to-reality gap:} policies trained in simplified simulators may not transfer to real
+        traffic~\cite{zhao2020sim2real}. \todo{what this implies for the conclusions of this study.}
+\end{itemize}
+
+\subsection{Contributions}
+\todo{Bullet list of what was actually done: two from-scratch implementations, shared evaluation protocol,
+reward study, density study, \ldots}
+
+\subsection{Report structure}
+\Cref{sec:problem} formulates the MDP, \cref{sec:methods} presents the baseline and the two algorithms,
+\cref{sec:reward} the reward designs, and \cref{sec:protocol} the experimental protocol.
+\Cref{sec:results} reports the results, \cref{sec:discussion} discusses them, and
+\cref{sec:conclusion} concludes. The appendix gives reproduction instructions and full hyper-parameter tables.

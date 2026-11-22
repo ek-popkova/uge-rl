@@ -16,6 +16,7 @@ conditions, so all shared code lives in the `common/` package.
 ├── ppo/          # PPO implementation
 ├── scripts/      # random baseline, video recording
 ├── notebooks/    # analysis notebooks
+├── report/       # LaTeX report (see report/README.md)
 └── results/      # local outputs (ignored by git)
 ```
 
@@ -50,6 +51,11 @@ python -m ppo.train  --reward default --density medium --seed 0 --total-steps 10
 
 TODO: evaluation command via `common.evaluate`, and video recording via
 `scripts/record_video.py`.
+
+## Report
+
+The LaTeX report lives in `report/`. Build it with `reportuild.ps1` (Windows) or `report/build.sh`;
+see [report/README.md](report/README.md).
 
 ## Team
 
