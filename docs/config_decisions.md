@@ -173,7 +173,7 @@ grid has started is reported as a deviation (`docs/evaluation_protocol.md` secti
 
 | Value | Frozen as | Justification |
 |---|---|---|
-| `TrainBudget.total_env_steps` | 300,000 | 8 of the 10 calibration runs had not plateaued by 200k and the plateau rule gives 300k (the calibration itself recommended 200k because that figure is censored by the budget: it is a lower bound). The team accepted the cost: 64 runs (40 main + 24 sensitivity) x 315,000 simulated steps = 20.2 M, about 39 h on one machine at the measured 143 steps/s, about 20 h per machine on two |
+| `TrainBudget.total_env_steps` | 300,000 | 8 of the 10 calibration runs had not plateaued by 200k and the plateau rule gives 300k (the calibration itself recommended 200k because that figure is censored by the budget: it is a lower bound). The team accepted the cost: 64 runs (40 main + 24 sensitivity) x 315,000 simulated steps = 20.2 M, about 39 h on one machine at the measured 143 steps/s, about 20 h per machine on two (one algorithm per machine, 32 runs each) |
 | `TrainBudget.val_every_env_steps` | 12,000 | 25 points per learning curve at 300k (the calibration proposed 25 points; its 8,000 was computed for a 200k budget). Validation costs 25 x 20 x 30 = 15,000 steps per run, 5% of the training steps |
 | `TrainBudget.val_n_episodes` | 20 | all `VAL_SEEDS`. 50 episodes would need 30 new seed values, a re-derived `beats_idle` (its constants come from the idle baseline on these 20 seeds) and about 4 h more machine time |
 | `TARGET_CONSECUTIVE` | 3, for both levels | the chance that a policy 10 points worse than the bound passes it by luck at `k` consecutive points of 20 episodes is about 25% / 6% / 1.5% at `k` = 1 / 2 / 3. At `k` = 1 `beats_idle` was reached by transient lucky points at 10,000 steps |
@@ -211,16 +211,38 @@ only): `docs/calibration.md`, section 4.
 
 ### Two machines and OneDrive
 
-The main grid and the sensitivity runs are split over two computers by training seed (for example seeds 0-2 on one, 3-4 on the other), so
-that each machine runs both algorithms and all rewards. `run_meta.json` records the hostname and the CPU model. Env steps to a target and to
-the plateau do not depend on the hardware and are the primary cost metrics; wall times, steps/s and inference time are compared only within
-one machine (`cost_across_seeds` groups them by machine and never pools them). During the calibration OneDrive locked files and 6 runs
+The runs are split over two computers BY ALGORITHM: all DDQN runs (main grid, tuning, sensitivity) on one machine, all PPO runs on the
+other, and each owner tunes their algorithm-specific hyperparameters on their own machine. This replaces the earlier plan (split by training
+seed, each machine running both algorithms and all rewards). It is a deliberate deviation and is reported as a limitation: algorithm and
+hardware are confounded, so a wall-clock difference between DDQN and PPO cannot be attributed to the algorithm. `run_meta.json` records the
+hostname, the CPU model and the number of logical cores.
+
+- **Compared between DDQN and PPO:** only hardware-independent metrics: env steps to the `TARGET_PERFORMANCE` levels (`steps_to_threshold`),
+  env steps to the plateau (`steps_to_plateau`), the number of gradient updates and the parameter count.
+- **Not compared between DDQN and PPO:** wall times, steps/s, `update_time_s`, inference ms. They are reported per machine, with the machine
+  described (`cpu_model`, `logical_cores`), and used only for within-algorithm comparisons (`cost_across_seeds` groups them by machine and
+  never pools them).
+- **Resource limit, identical on both machines:** at most 8 busy simulator processes at the same time per machine. Reason: aggregate
+  throughput peaks at 8 processes on the reference Intel Core Ultra 9 285H (16 logical cores) and drops at 12-16, and process affinity makes
+  no measurable difference (`docs/performance_analysis.md` C5, item 9). Every process that steps an env counts: one per DDQN run (validation
+  with `--workers 1` runs in-process); for PPO with `--workers > 1` one subprocess per vector env plus the validation pool, which alternate
+  (validation runs between rollouts) and therefore peak at `max(n_envs, workers)` processes; a PPO run with `--workers 1` is one process.
+  Nothing else heavy runs during training (C8). If the second machine has a different CPU, the scaling is measured once there (rule 5) and
+  recorded in `docs/performance_analysis.md`; the limit stays 8 unless that measurement shows the plateau elsewhere, and any change is
+  reported as a deviation.
+- **Same library versions** on both machines (`requirements-lock.txt`, checked by `scripts/check_env.py`).
+
+During the calibration OneDrive locked files and 6 runs
 crashed with `PermissionError`, and resumed runs are not bit-identical; the harness warns and records `onedrive_path` if the project or output
 directory is inside OneDrive. Move the project out of OneDrive (or pause sync) and disable sleep before long runs.
 
 ## Limitations
 
 - **Training only at medium density.** Generalization to low and high density is evaluated, not trained.
+- **Algorithm and hardware are confounded.** DDQN and PPO are trained on different machines (split by algorithm, not by training seed, a
+  deliberate deviation from the earlier plan), so no wall-clock quantity can be compared between them. The cost comparison rests on env
+  steps to the targets and to the plateau, gradient updates and parameter count; wall times, steps/s, update time and inference time are
+  reported per machine and used only within one algorithm.
 
 ## References
 

@@ -28,7 +28,8 @@ wall time until each pre-registered level of ``TARGET_PERFORMANCE`` holds at ``T
 ``auc_across_seeds`` (area under the learning curve). Points are aligned across seeds by validation
 index, not by env step (PPO's validation steps differ slightly between runs). ``steps_to_plateau`` is a post-hoc
 measure of how fast a run learns (never used to stop training). ``cost_per_model`` / ``cost_across_seeds`` put the steps to
-the targets and to the plateau next to the wall-time columns; wall times are grouped by machine and never pooled across machines.
+the targets and to the plateau next to the wall-time columns; wall times are grouped by machine and never pooled across machines
+(DDQN and PPO are trained on different machines, so wall times are never compared between the algorithms).
 """
 
 from __future__ import annotations
@@ -402,10 +403,13 @@ def auc_across_seeds(
 # ---------------------------------------------------------------------------------------------
 # Computational cost per model and across seeds; wall-time columns are NEVER pooled across machines
 # ---------------------------------------------------------------------------------------------
-# The main grid and the sensitivity runs are split over two computers by training seed (docs/evaluation_protocol.md section 11).
-# Env steps to a target / to the plateau do not depend on the hardware and are pooled over all machines. Everything measured in
-# seconds (training wall time, steps/s, update time, inference time) depends on the machine, so those columns are grouped by
-# the machine identifier (``run_meta.json`` reproducibility.hostname) and a mean is never taken across machines.
+# The runs are split over two computers BY ALGORITHM (all DDQN runs on one machine, all PPO runs on the other;
+# docs/evaluation_protocol.md section 11). Env steps to a target / to the plateau do not depend on the hardware and are pooled over all
+# runs of a group. Everything measured in seconds (training wall time, steps/s, update time, inference time) depends on the machine, so
+# those columns are grouped by the machine identifier (``run_meta.json`` reproducibility.hostname) and a mean is never taken across
+# machines. With this split a machine holds one algorithm, so the wall-time rows of DDQN and PPO sit on different machines and are NOT
+# comparable with each other: they are within-algorithm information only (the DDQN vs PPO cost comparison uses the ``steps_to_*``
+# rows, which carry ``machine = "all"``).
 COST_KEYS = ["algorithm", "train_reward", "variant", "train_seed"]
 COST_GROUP_KEYS = ["algorithm", "train_reward", "variant"]
 ALL_MACHINES = "all"  # machine label of the hardware-independent rows of ``cost_across_seeds``
@@ -475,7 +479,9 @@ def cost_across_seeds(per_model: pd.DataFrame, levels: Optional[Sequence[str]] =
     reached the target / plateau), ``n_runs`` the number of runs of the group, ``n_censored`` (plateau only) how many of
     the counted plateau points lie in the last 20% of the curve. Hardware-independent metrics (env steps) are summarized
     over all runs of (algorithm, train_reward, variant) with ``machine = "all"``; wall-time metrics once PER MACHINE, never
-    pooled across machines (a group with a single run has no interval).
+    pooled across machines (a group with a single run has no interval). Runs are split by algorithm, so every wall-time row
+    belongs to one algorithm on one machine and is not comparable with the other algorithm's rows; only the ``machine = "all"``
+    rows (env steps to the targets and to the plateau) are compared between DDQN and PPO.
     """
     levels = list(TARGET_PERFORMANCE) if levels is None else list(levels)
     rows = []

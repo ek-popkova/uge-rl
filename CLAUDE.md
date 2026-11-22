@@ -122,11 +122,26 @@ Rules:
   Any deviation is reported as such.
 - **Shared training decisions are frozen** (table below, `docs/config_decisions.md` "Shared training decisions"): they may
   only change by team agreement, and a change after the main grid has started is reported as a deviation.
-- **Two machines.** The main grid and the sensitivity runs are split over two computers BY TRAINING SEED (for example seeds 0-2
-  on one, 3-4 on the other), so each machine runs both algorithms and all rewards. `run_meta.json` records `reproducibility.hostname`
-  and `cpu_model`. Wall times (`train_wall_s`, steps/s, update and inference time) are compared only within one machine:
-  `common.aggregate.cost_across_seeds` groups them by machine and never pools them. The primary cost metrics are env steps to the
-  targets and to the plateau, which do not depend on the hardware. Inference time is compared only within one machine.
+- **Two machines, split BY ALGORITHM.** All DDQN runs (main grid, tuning, sensitivity) are trained on one machine, all PPO runs on the
+  other; each owner tunes their own algorithm-specific hyperparameters there. This replaces the earlier plan (split by training seed,
+  each machine running both algorithms) and is a deliberate deviation, reported as a limitation: algorithm and hardware are
+  confounded, so no wall-clock quantity may be compared between DDQN and PPO. `run_meta.json` records `reproducibility.hostname`,
+  `cpu_model` and `logical_cores`; both machines use identical library versions (`scripts/check_env.py`).
+  - **Compared between DDQN and PPO (hardware-independent only):** env steps to the `TARGET_PERFORMANCE` levels
+    (`steps_to_threshold`), env steps to the plateau (`steps_to_plateau`), the number of gradient updates and the parameter count.
+  - **NOT compared between DDQN and PPO:** `train_wall_s`, steps/s, `update_time_s`, inference ms and every other time. They are
+    reported per machine, with the machine described (`cpu_model`, `logical_cores`), and used only for within-algorithm comparisons.
+    `common.aggregate.cost_across_seeds` groups wall-time rows by machine and never pools them; with this split a machine holds one
+    algorithm, so a wall-time row of one algorithm must never be put next to the other's as if it were a comparison.
+  - **Agreed resource limit, identical on both machines: at most 8 busy simulator processes at the same time per machine**
+    (`docs/performance_analysis.md` C5: aggregate throughput peaks at 8 processes on the reference Intel Core Ultra 9 285H, 16 logical
+    cores, and drops at 12-16; process affinity makes no measurable difference, item 9). Count every process that steps an env: one
+    per DDQN run (its validation with `--workers 1` runs in-process); for PPO with `--workers > 1` one subprocess per vector env
+    plus the validation pool (the two phases alternate, never step at the same time, so a run peaks at `max(n_envs, workers)`
+    busy processes; count that); a PPO run with `--workers 1` is one process. Nothing else heavy runs during
+    training (C8). If the second machine has a different CPU, measure the scaling once there (rule 5) and record the result in
+    `docs/performance_analysis.md`; the limit stays 8 unless the measurement shows the plateau elsewhere, and any change is noted
+    as a deviation.
 - **Not in OneDrive.** During the SB3 calibration, OneDrive locked files and 6 runs crashed with `PermissionError`; a resumed run
   is not bit-identical to an uninterrupted one. The harness prints a warning and records `reproducibility.onedrive_path` if the
   project or output directory is inside OneDrive (it does not block). Before long runs move the project out of OneDrive (or pause
@@ -158,9 +173,9 @@ Frozen by the team; `common/train_config.py`, `common/networks.py`, `common/conf
 | budget (frozen after the SB3 calibration) | `total_env_steps = 300,000`, `val_every_env_steps = 12,000` (25 validation points), `val_n_episodes = 20` (all `VAL_SEEDS`); both step values must be multiples of the PPO rollout size `n_envs * n_steps` (`check_budget_matches_rollout`, `check_comparable(..., budget)`, checked by `resolve_setup` and at `TrainingRun` start); tuning and sensitivity runs use the same budget |
 | targets (frozen after the calibration) | `TARGET_PERFORMANCE["strong"]` = `crash_rate <= 0.4` and `mean_speed >= 25.5`; `TARGET_CONSECUTIVE = 3` for BOTH levels (`beats_idle` and `strong`); every run trains for the full budget, there is no early stopping |
 | plateau (post-hoc, pre-registered) | `common.aggregate.steps_to_plateau(val_log, "return_own", reward)`: `PLATEAU_WINDOW = 5` points, `PLATEAU_TOL = 0.10` of the improvement (final level over the last 20% of the points minus the first value); NaN with `censored = True` if there is no improvement, `censored = True` if the plateau point is inside the last 20%; computed after training only |
-| two machines | runs split by training seed, wall times grouped by machine, never pooled (rule "Two machines" above) |
+| two machines | split BY ALGORITHM (all DDQN runs on one machine, all PPO runs on the other; deviation from the earlier seed split, reported as a limitation); DDQN vs PPO cost only by env steps to the targets / plateau, gradient updates and parameter count; wall times, steps/s, `update_time_s`, inference ms never compared across algorithms; at most 8 busy simulator processes per machine (rule "Two machines" above) |
 | videos | `milestone_fractions = (0.1, 0.25, 0.5)` + the always-kept final checkpoint; candidate episode seeds shared by both algorithms: both crashed, both completed, and the two disagreement cases (only DDQN / only PPO crashed), `common.failure_cases.video_episode_seeds`; the report video uses training seed 0 of each reward, `main` condition, plus the early / middle milestones (`docs/evaluation_protocol.md` section 11) |
-| derived / engineering (no team decision) | `TARGET_PERFORMANCE["beats_idle"]` = `crash_rate < 0.6` and `mean_speed > 24.8` (idle on `VAL_SEEDS`: 0.6 and 24.7564 m/s, source next to the constant); `checkpoint_every_env_steps = 10,000` (about 10 min of wall time at 12-17 env steps/s per process with 8-12 parallel runs, does not affect results); `update_log_every` K = 100 (DDQN) / 1 (PPO) |
+| derived / engineering (no team decision) | `TARGET_PERFORMANCE["beats_idle"]` = `crash_rate < 0.6` and `mean_speed > 24.8` (idle on `VAL_SEEDS`: 0.6 and 24.7564 m/s, source next to the constant); `checkpoint_every_env_steps = 10,000` (about 10 min of wall time at 12-17 env steps/s per process with up to 8 parallel runs, does not affect results); `update_log_every` K = 100 (DDQN) / 1 (PPO) |
 
 ### TO DECIDE BEFORE TRAINING
 
@@ -184,8 +199,8 @@ the session, `docs/performance_analysis.md` C5, C8), so every 1 M simulated step
 model costs `T + n_val x val_n_episodes x 30` simulated steps, with `n_val = T / val_every` (`TrainBudget.n_val_points`).
 With the frozen budget (T = 300,000, 25 validations x 20 episodes x 30 steps = 15,000 steps) that is 315,000
 steps; the 40 main-grid models are 12.6 M steps and the 24 sensitivity runs 7.6 M, so the 64 runs are 20.2 M steps: about 39 h on
-one machine at the 143 steps/s measured in the calibration (61 h at 92), about 20 h per machine on two. Tuning adds at most 8 runs
-(4 per algorithm) at the same budget, 2.5 M steps, about 5 h. These figures use the SB3 speed of the calibration and ignore
+one machine at the 143 steps/s measured in the calibration (61 h at 92), about 20 h per machine on two (each machine: the 32 runs of one algorithm, 10.1 M steps, at most 8 busy processes). Tuning adds at most
+8 runs (4 per algorithm, one algorithm per machine) at the same budget, 2.5 M steps, about 5 h in total. These figures use the SB3 speed of the calibration and ignore
 network updates and the `EpisodeRecorder` overhead (measured: see `README.md`, Training); our implementations may be faster or
 slower than SB3, so re-estimate after tuning. `TrainingRun` prints its own simulation-only estimate from a quiet benchmark before
 starting and refuses above `--max-minutes` (default 45) without `--force`: a 300,000-step run is estimated at hours, so main-grid,
@@ -203,8 +218,11 @@ sensitivity and tuning runs need `--force` (or a larger `--max-minutes`).
   with the behavioural metrics (crash rate, completion, mean speed, near-miss, lane changes) across the four reward presets.
 - [ ] Hyperparameter tuning (`docs/tuning_log.md`) and sensitivity (the 24 runs of `expand_sensitivity_grid()`, 3 seeds per
   setting; run `check_sensitivity_runs` before building the table), reported separately from the main grid.
-- [ ] Cost comparison: run the quiet benchmarks (`quiet_benchmark_steps_per_s`, `inference` in `run_meta.json`) in a quiet process;
-  runs trained in parallel have disturbed wall times (C8).
+- [ ] Cost comparison (DDQN vs PPO): only hardware-independent metrics (env steps to the targets and to the plateau, gradient updates,
+  parameter count). Report wall times, steps/s, `update_time_s` and inference ms per machine (`cpu_model`, `logical_cores` from
+  `run_meta.json`) as within-algorithm information only; run the quiet benchmarks (`quiet_benchmark_steps_per_s`, `inference`) in a
+  quiet process on each machine (runs trained in parallel have disturbed wall times, C8). State the algorithm-by-machine
+  confounding in the limitations.
 - [ ] Critical discussion (limitations: 5 Hz fast simulator, one training density, 5 seeds, placeholder-derived hyperparameters).
 
 ## Tests: why they exist and when to run them

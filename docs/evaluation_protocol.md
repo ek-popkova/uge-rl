@@ -301,10 +301,11 @@ team agreement, and a change after the main grid has started is reported as a de
   baseline. Every run trains for the full budget (no early stopping).
 - **Plateau rule (pre-registered):** `steps_to_plateau` with `PLATEAU_WINDOW = 5` and `PLATEAU_TOL = 0.10` (section 7), applied after
   training; not changed after the main grid has started.
-- **Two machines:** the main grid and the sensitivity runs are split by training seed (for example seeds 0-2 on one machine, 3-4 on the
-  other), so that each machine runs both algorithms and all rewards. Wall times are compared only within one machine; the primary cost
-  metrics are env steps to a target and to the plateau, which do not depend on the hardware; inference time is compared only within one
-  machine (section 11).
+- **Two machines, split by algorithm:** all DDQN runs (main grid, tuning, sensitivity) are trained on one machine and all PPO runs on the
+  other (deliberate deviation from the earlier split by training seed; algorithm and hardware are confounded, reported as a limitation).
+  DDQN vs PPO cost is compared only by hardware-independent metrics (env steps to the target levels and to the plateau, gradient updates,
+  parameter count); wall times, steps/s, update time and inference time are reported per machine and never compared between the
+  algorithms (section 11).
 - **Video milestones** `milestone_fractions = (0.1, 0.25, 0.5)` plus the always-kept final checkpoint, and the video episode
   rule in section 11.
 
@@ -342,19 +343,26 @@ Every training run (`common/training.py`, the same for DDQN and PPO) writes, wit
 size 1, CPU, one thread, on observations visited by the final agent on the first five `VAL_SEEDS` episodes; 100 untimed
 warm-up calls, then 1,000 timed calls; median and 90th percentile are stored (also mean). Measured once at the end of
 training and only meaningful in a quiet process: other running jobs inflate it (CLAUDE.md rule 1, C8), so for runs trained
-in parallel the cost comparison repeats the benchmark on the saved checkpoints in a quiet process.
+in parallel the benchmark is repeated on the saved checkpoints in a quiet process. It is a per-machine figure and is not compared
+between DDQN and PPO (they were trained on different machines, see below).
 
-**Computational cost** is reported as (a) env steps to the `TARGET_PERFORMANCE` levels and to the plateau (section 7; these do not
-depend on the hardware and are the primary metrics), (b) the update cost per env step
-(the `update_time_s` / `env_time_s` split, which does not depend on the speed of the simulator), (c) the inference time and
-(d) the parameter count. Raw wall time of runs that ran in parallel is not compared across algorithms.
+**Computational cost.** The DDQN vs PPO comparison uses only hardware-independent metrics: (a) env steps to the `TARGET_PERFORMANCE`
+levels and to the plateau (section 7), (b) the number of gradient updates and (c) the parameter count. Everything measured in seconds
+(`train_wall_s`, wall time to a target or plateau, steps/s, `update_time_s` and its split from `env_time_s`, inference time) depends on the
+machine and is NOT compared between DDQN and PPO, because the two algorithms were trained on different machines; these quantities are
+reported per machine, with the machine described (`cpu_model`, `logical_cores` from `run_meta.json`), and used only for within-algorithm
+comparisons (for example one algorithm across reward presets or variants).
 
-**Two machines.** The main grid and the sensitivity runs are split over two computers by training seed (for example seeds 0-2 on one,
-3-4 on the other), so that each machine runs both algorithms and all rewards. Everything measured in seconds (`train_wall_s`, wall time to
-a target or plateau, steps/s, update time per env step, inference time) is only compared within one machine: `common.aggregate.cost_across_seeds`
-groups these columns by the machine identifier (`reproducibility.hostname`) and never pools them across machines, while env steps to a
-target or plateau are pooled over all machines. The inference benchmark of the cost comparison is repeated on the saved checkpoints in a
-quiet process on each machine.
+**Two machines, split by algorithm.** All DDQN runs (main grid, tuning, sensitivity) are trained on one computer and all PPO runs on the
+other. This replaces the earlier plan (split by training seed, both algorithms on each machine); it is a deliberate deviation, reported as a
+limitation (algorithm and hardware are confounded). Consequently DDQN and PPO are compared only by hardware-independent metrics (env steps
+to the targets and to the plateau, gradient updates, parameter count). Everything measured in seconds (`train_wall_s`, wall time to a target
+or plateau, steps/s, update time per env step, inference time) is NOT compared between the algorithms: it is reported per machine (with
+`cpu_model` and `logical_cores`) and used only within one algorithm. `common.aggregate.cost_across_seeds` groups these columns by the machine
+identifier (`reproducibility.hostname`) and never pools them across machines, while env steps to a target or plateau are pooled over all runs
+of the group. The inference benchmark is repeated on the saved checkpoints in a quiet process on each machine and is likewise a per-machine
+figure. Resource limit, identical on both machines: at most 8 busy simulator processes at the same time (`docs/performance_analysis.md` C5;
+counting rule in `CLAUDE.md`, "Two machines, split BY ALGORITHM"). Both machines use the library versions of `requirements-lock.txt`.
 
 **OneDrive.** During the calibration, OneDrive locked files and 6 runs crashed with `PermissionError`; a resumed run is not bit-identical to an
 uninterrupted one. At the start of a run the harness prints a prominent warning if the project or the output directory is inside a
