@@ -7,6 +7,9 @@ See `README.md` for layout and setup.
 ## Conventions
 
 - Python: use the project venv (`.venv/Scripts/python.exe` on Windows). Code comments in English.
+- Environment: Python 3.13, exact library versions in `requirements.txt`, full lock in `requirements-lock.txt`; both machines install
+  from the lock. Run `python scripts/check_env.py` before the first training run on a machine (non-zero exit = version mismatch;
+  do not train until it passes). Library versions are part of the comparison: never upgrade a package on one machine only.
 - `common/config.py` holds team-agreed placeholders. Do not change its values unless asked.
 - Experiment outputs go to `results/` (git-ignored); do not commit results.
 - SB3 calibration runs (`scripts/calibration/`, report `docs/calibration.md`) are calibration only: run seeds `CALIBRATION_SEEDS = [99, 98]` (98 is reserved for them), outputs in `results/calibration/`, evaluated on `VAL_SEEDS` only; never part of the DDQN vs PPO comparison.

@@ -38,8 +38,17 @@ source .venv/bin/activate
 # Windows (PowerShell)
 .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install -r requirements-lock.txt
+python scripts/check_env.py       # exits non-zero if Python or any package differs from the lock
 ```
+
+Both machines (one trains DDQN, the other PPO) must have **identical versions**, so both install from `requirements-lock.txt`
+(the full `pip freeze` of the reference environment, exact versions). `requirements.txt` stays the readable top-level list
+(same exact versions for the direct dependencies). Python must be **3.13** (reference environment 3.13.3) and torch the **CPU
+build** (on Linux: `pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu` first). Run
+`scripts/check_env.py` once on every machine before the first training run: it compares the Python minor version and every
+package of the lock with what is installed and prints each mismatch. `requirements-calibration.txt` (SB3) is already part of
+the lock; it is only used by `scripts/calibration/`.
 
 ## Configuration
 
@@ -70,7 +79,7 @@ The shared settings live in `common/config.py` and were chosen from the environm
 ## Tests
 
 ```bash
-pip install -r requirements.txt   # includes pytest
+pip install -r requirements-lock.txt   # includes pytest
 python -m pytest -m "not slow"    # fast tier: 83 tests in 4-8 s (pure functions and fake envs; use during development)
 python -m pytest                  # full suite: 143 tests in 227 s (3 min 47 s; 146 s in an earlier quiet run, wall time varies 2-5x here, C8)
 ```
