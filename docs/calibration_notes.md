@@ -1,0 +1,122 @@
+Written after reading sections 0-5. Everything refers to 20 `VAL_SEEDS` episodes, one seed per reward (two for balanced), SB3 reference implementations with
+no tuning. Nothing was changed in `common/config.py` or `common/train_config.py`; the items below are proposals for the team.
+
+> **Outcome (team decision after this report).** The team froze the shared values in a follow-up change
+> (`docs/config_decisions.md`, "Values frozen after the calibration"): `total_env_steps = 300,000` (instead of the 200,000 recommended
+> here, accepting about 39 h for the 64 runs split over two machines), `val_every_env_steps = 12,000` (25 points), `val_n_episodes = 20`,
+> `TARGET_CONSECUTIVE = 3` for both levels and `strong` = crash rate <= 0.4 and mean speed >= 25.5 m/s. The text below is the
+> unchanged calibration-time interpretation; "nothing was changed" refers to the state when this report was written.
+
+### Summary
+
+| Question | Answer in one line |
+|---|---|
+| Q1 rewards | SB3 DQN separates the presets in the intended direction (speed 29.6 / 29.4 / 20.5 m/s, crash rate 0.50 / 0.45 / 0.00 for efficiency / balanced / safety), except that efficiency and balanced differ only in lane use. SB3 PPO does not separate them (balanced = safety, all four crawl at about 21 m/s): that is a failure of SB3 PPO with its defaults here, not evidence about the presets. |
+| Q2 conditions | `main` and `high` are informative; `low` is close to the floor for learned agents (0-4 crashes in 20); `precise` is within the 20-episode noise of `main`; `long` only adds information for crash-prone agents. No condition meets the formal "uninformative" rule. |
+| Q3 seeds | DQN: large spread, partly because the final checkpoint is a noisy draw (policy flips between a slow-safe and a fast-risky mode); PPO: both seeds collapsed to the same slow policy, so its spread says nothing. 5-seed 95% half-widths implied for DQN balanced: about +-0.12 crash rate, +-1.8 lane changes, +-0.9 return. |
+| Q4 budget | The 5% plateau rule fails for 8 of 10 runs (censored by the 200k budget, and by noise for DQN). Formula result 300,000; recommendation 200,000 (150,000 if the budget forces it, not 100,000). Keep 20 validation episodes, `TARGET_CONSECUTIVE = 3`; the current `strong` placeholder is reached by 1 of 10 runs at k = 1 and by none at k >= 2. |
+
+### Q1: do the four reward presets lead to different learned behaviour?
+
+**SB3 DQN: yes, as intended, with one exception.** Final models (seed 99, `main`): efficiency 29.6 m/s / crash rate 0.50, balanced 29.4 / 0.45, safety
+20.5 / 0.00 with the fewest lane changes (1.7 vs 3.7 and 5.4) and the highest rightmost-lane share (0.85); the default reward sits between (26.0 m/s, 0.25).
+Every difference involving `safety` exceeds both the seed spread and the 20-episode noise. **Efficiency and balanced are practically indistinguishable in speed and
+crash rate** (differences 0.23 m/s and 0.05, both below the seed spread of 0.39 and 0.15); they differ in lane use: rightmost-lane share 0.29 vs 0.68, lane-change
+reversals 0.25 vs 1.95, which is what `w_right` and `w_lane` of `balanced` are for.
+
+**SB3 PPO: no, but this is the algorithm, not the presets.** Balanced and safety are the same policy (crash 0, 20.9 / 21.1 m/s, 1.25 lane changes, 83-89% SLOWER
+actions); `default` is almost the same; `efficiency`, the preset that pays most for speed, learned the least speed (20.8 m/s) and a degenerate lane-change pattern
+(17.8 lane changes, 60% LANE_LEFT, return 0.7). The training logs show a fast collapse: the stochastic training policy already crashes in only 0.3 of the episodes
+after the first 10% of the run and in about 0.01 from 40% on, at 21-23 m/s, with the entropy still falling (1.3 -> 0.6-1.1, maximum 1.61). With `ent_coef = 0` SB3 PPO
+settles in the safe crawling mode before it finds fast safe driving. The main-grid PPO placeholders differ (`ent_coef = 0.01`), so this should not be extrapolated,
+but it is a warning that PPO may need its entropy bonus / more steps tuned before the presets can be compared.
+
+**Why `balanced` does not push to fast driving.** With `balanced` the slow safe policy and DQN's fast risky one earn about the same own return: PPO balanced 4.1 (4.3 for
+seed 98) vs DQN balanced 4.3 (last 20% of the run; final 1.7 and 6.0 for its two seeds), against 1.2 for the scripted `slower` and -6.5 for `idle`. That is what its
+analytic indifference point p = 0.61 predicts: fast driving only pays if more than 61% of the episodes survive, and DQN's survival rate is 55-70%. If the team wants
+`balanced` to separate from `efficiency` by speed and crash rate, its crash weight / speed weight is the lever (p = 0.47 at w_collision = 12); the evidence here
+(one DQN algorithm, two seeds) does not justify changing the pre-registered weights, so the proposal is: **keep the four presets**, and treat balanced vs efficiency
+as a lane-discipline contrast and balanced vs safety as the speed-vs-caution contrast.
+
+**Does a higher return mean better driving? Not across presets.** Over the 8 final models the default return has rank correlation +0.90 with mean speed and
+-0.63 with the completion rate, the efficiency return +0.98 and -0.73: the models with the highest `return_default` (23.6 and 23.5) crash in 50% and 25% of the
+episodes, while a model with 22.7 crashes in 0% (PPO balanced). The balanced and safety returns correlate positively with completion (+0.73, +0.90), but their best model
+(PPO safety, 4.2 / 3.0) drives at 21.1 m/s, among the slowest. A return is a trade-off under its own preset; the ranking by return agrees with "driving better" only if the preset's
+trade-off is the one wanted, so the report should compare presets by behaviour (crash, completion, speed, lane use) and never by returns.
+
+### Q2: are the density levels and test conditions informative?
+
+No condition meets the formal rule (all learned models within 10 points, or all at the floor / ceiling), but they differ a lot in value:
+
+- `main`: informative (learned 0.00-0.50 crash, scripted 0.00-1.00).
+- `high`: the most discriminating (learned 0.10-1.00; the fast DQN models 0.95-1.00, the slow PPO models 0.10-0.30, `slower` 0.05): hard but feasible, as designed.
+- `low`: near the floor for learned agents (DQN 0.10 / 0.20 / 0.00 / 0.00, PPO 0.00 / 0.10 / 0.00 / 0.00; idle 0.05): it separates the learned models from `random` (0.40) and
+  `faster` (0.55) but not from `idle` or from each other (differences of 0-4 episodes of 20). Keep it as a generalisation check, do not expect it to rank agents.
+- `precise`: crash rate within 0.10 of `main` for every model (the largest gap is two episodes, the 20-episode noise is 0.11); the baselines show the same. These agents
+  show no sensitivity to the 15 Hz physics; 100 test episodes are needed to say more.
+- `long`: the `long` / `main` crashes-per-km ratio of the crash-prone DQN models (0.93, 1.12, 1.23) lies inside the baselines' range (1.00-1.47); for the models without crashes
+  on `main` the ratio is undefined. `long` only adds information for crash-prone agents; crawling agents drive 60 s crash-free.
+
+Caveat: 20 episodes and mostly crawling PPO agents. The picture can change when the main-grid agents drive fast and safely.
+
+### Q3: seed-to-seed spread
+
+DQN balanced, seed 99 vs 98 (two seeds only, sd = |d| / sqrt(2), one degree of freedom): final-model crash rate 0.45 vs 0.30, mean speed 29.4 vs 29.8, lane changes 5.4 vs 4.9,
+`return_balanced` 1.7 vs 6.0. Using the mean of the last three validation points instead of the single final point changes the picture (crash 0.20 vs 0.33, speed 26.4 vs 29.7,
+return 4.2 vs 5.2): seed 99 had one transient validation point where the policy was "always SLOWER" (speed 20.0, crash 0). The implied half-widths of the 95% t-interval over 5 seeds
+are about +-0.12 (crash rate), +-1.8 (lane changes) and +-0.9 (return, last-3 mean); the learning curves of the two seeds have the same overall shape (return curve correlation 0.61,
+crash-rate curve 0.37) but differ in the details. PPO: crash 0.00 vs 0.00, speed 20.9 vs 21.6, return 3.9 vs 4.7; the two seeds collapsed to the same slow policy (curve correlation 0.90),
+so the small spread is a property of that failure mode, not of PPO.
+
+More informative than the two-seed difference is the within-run noise: over the last 20% of the run the point-to-point standard deviation of the DQN crash rate is 0.25 (default), 0.15 and
+0.12 (balanced), 0.10 (efficiency), against a pure sampling noise of 0.10-0.11 for 20 episodes. For efficiency the validation noise is just binomial; for default and balanced the
+policy itself fluctuates between a slow-safe and a fast-risky mode (crash rate jumping between 0.0 and 0.9 within a few thousand steps, see the curves). **A DQN final checkpoint is
+therefore a lottery draw on top of the sampling noise**; the protocol evaluates the final checkpoint only, so the main-grid DQN seed spread may be larger than the sampling error of the
+100 test episodes suggests.
+
+### Q4: budget, validation noise, targets
+
+**Learning speed.** DQN leaves the random level within 20-40k steps (training crash rate 0.8-0.9 -> 0.3-0.4 for balanced / efficiency) and keeps improving slowly: efficiency 6.2 @100k ->
+11.4 @150k -> 12.3 (last 20%); default 19.8 -> 21.9 -> 22.9; balanced and safety oscillate around a flat mean after about 100k. SB3 PPO has made most of its (small) improvement by 50-100k steps (it converges to the crawling mode;
+entropy still falling). The 5% plateau rule is censored by the 200k budget (8 of 10 runs are only "plateaued" inside the last 20%) and for DQN dominated by noise (5% of a return of about 4 is 0.2,
+the validation sd is about 3).
+
+**total_env_steps.** The formula (latest plateau point x 1.3-1.5) gives 260,000-300,000, i.e. **300,000**, but its input is censored at 200,000, so it only says "more than the 200k seen". Cost of the
+64 runs (40 main grid + 24 sensitivity, 25 validations each): 14.3 h at 100k, 20.5 h at 150k, 26.8 h at 200k, 39.2 h at 300k at the measured aggregate rate of 143 simulated steps/s (22.2 h at 200k at the
+optimistic 172 steps/s); tuning adds up to 8 default-budget runs. **Recommendation: 200,000** (it is where the calibration saw the two DQN runs that are still rising gain a little more: +4% for default and +8% for efficiency between 150k and the last 20%);
+**150,000** if the machine time is the constraint (DQN default and efficiency are within 4-8% of their final return then); **not 100,000** (DQN efficiency has made only about half of its improvement, DQN default is not above its starting level).
+The budget must be a multiple of the PPO rollout size of the final configuration (200,000 is a multiple of the placeholder 4 x 250 = 1,000, not of 8 x 256 = 2,048).
+
+**val_every_env_steps / val_n_episodes.** 25 points per curve: 8,000 steps for 200k (6,000 for 150k). With 20 episodes the crash-rate SE is 0.11 at p = 0.5 (0.05 on average), 0.09 with 30 and 0.07 with 50
+episodes. For DQN default and balanced the observed point-to-point sd is 1.2-2.3 times the binomial one, so more episodes only shrink the sampling part. **Keep 20 episodes**; 50 would cost 1.44 M more
+simulated steps for the 64 runs (+2.8 h at 143 steps/s), would need 30 new seeds disjoint from all other sets (e.g. 20020-20049) and would force `beats_idle` to be re-derived from 50 idle episodes. The noise is
+controlled by `TARGET_CONSECUTIVE`.
+
+**TARGET_CONSECUTIVE = 3 (proposal).** A policy 10 points worse than the bound passes by luck with probability 0.24-0.25 at k = 1, 0.06 at k = 2 and 0.013-0.016 at k = 3 (bounds 0.2-0.4, 20 episodes). In the data,
+`beats_idle` is "reached" at 10,000 steps (k = 1) by DQN safety and DQN balanced seed 98, i.e. by transient lucky points, and at 50,000-55,000 with k = 2; DQN default needs 50k (k = 1), 150k (k = 2), 170k (k = 3). A genuinely
+good policy (true crash rate 0.2 under a 0.3 bound) still passes three points in a row with probability 0.76, so k = 3 delays a stable run a little but does not hide it.
+
+**The `strong` level.** The placeholder (crash <= 0.2, speed >= 25.5) is reached by 1 of the 10 runs at k = 1 and by none at k = 2 or 3. The two proposed anchors:
+
+- baseline anchor (crash <= 0.2 and speed >= 26.8, midway between idle and faster): 1 of 10 runs at k = 1 (DQN balanced seed 99, at 185k), none at k >= 2: effectively unreachable, NaN for everything unless the tuned agents are much better than SB3;
+- "worse of the SB3 final values, rounded slightly down" (balanced, last-3 mean, worse of DQN and PPO): crash <= 0.30 and speed >= 21.2 m/s. **Rejected:** a speed bound of 21.2 m/s is 1.2 m/s above `slower`, so a crawling policy
+  passes it, which violates the design rule that a level must be unreachable for trivial policies (and PPO balanced seed 99, 20.96 m/s, fails it anyway).
+
+Candidate grid (runs of 10 reaching it, k = 1 / 2 / 3): crash <= 0.2 and speed >= 24.8: 3 / 1 / 0; <= 0.3 and >= 25.5: 3 / 1 / 0; **<= 0.4 and >= 25.5: 5 / 3 / 2**; <= 0.4 and >= 26.8: 3 / 3 / 2.
+**Proposal: `strong` = crash_rate <= 0.4 and mean_speed >= 25.5 with `TARGET_CONSECUTIVE = 3`**: the only level of the grid that more than one run reaches at k = 3, clearly above idle (0.6 / 24.76), unreachable for every scripted
+baseline, and it separated DQN from PPO in the calibration (only DQN runs reach it). The trade-off: it is a lenient level; if the tuned DDQN and PPO are expected to be clearly better than the untuned SB3 agents, the team can
+keep a stricter level (<= 0.3 / >= 25.5) and accept the NaN risk, because `beats_idle` remains as the fallback reported for every run.
+**Important for any level:** the levels are applied to every run regardless of the reward, but the `safety` models are slow by design (DQN safety ends at 20.2 m/s): they cannot reach any speed bound, and `beats_idle` was only
+reached by them at transient early points. Steps to target should be reported per reward, and for `safety` it should not be interpreted (NaN is the expected result, not a failure).
+
+**Early warning.** DQN default was flagged at 100k (crash rate 0.78 vs random 0.70, own return 19.2 vs 17.5 +- 1.4): at that point it had not left the random level, though it improved afterwards (last 20%: return 22.9, crash 0.46).
+The run continued as specified.
+
+**Cost.** Training steps/s in the plan (13 busy processes): DQN 14.6 (quiet benchmark 36.6), PPO 81 (quiet 152); update share of the wall time 11% (DQN) and 10% (PPO); validation share 8% (DQN, in-process) and 19% (PPO, 2-worker pool);
+inference 0.06-0.07 ms per action for both. Aggregate 143 simulated steps/s for the whole plan, 5 DQN runs + 1 PPO run at a time (peak 13 processes, mean about 11): the benchmark-based estimate was 5.5 h of training, the measurement 4.36 h.
+
+### Caveats
+
+One seed per reward (two for balanced), 20 validation episodes, SB3 DQN is not Double DQN, SB3 PPO ran with `ent_coef = 0` and collapsed to a crawling policy (this probably says more about SB3 defaults on this reward scale than about
+PPO), initialisation and hyperparameters of our own implementations will differ, so all numbers are rough. Six DQN resumes (restart from a checkpoint after a `PermissionError` on a progress file, see section 0) make those
+runs not bit-identical to an uninterrupted run. The speeds of runs trained in parallel are not comparable with quiet benchmarks.

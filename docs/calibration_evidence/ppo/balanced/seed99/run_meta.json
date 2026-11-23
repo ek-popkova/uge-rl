@@ -1,0 +1,214 @@
+{
+  "status": "finished",
+  "error": null,
+  "identity": {
+    "algorithm": "sb3_ppo",
+    "train_reward": "balanced",
+    "train_density": "medium",
+    "seed": 99,
+    "variant": "calibration",
+    "overridden_keys": []
+  },
+  "hyperparameters": {
+    "learning_rate": 0.0003,
+    "n_envs": 8,
+    "n_steps": 256,
+    "batch_size": 64,
+    "n_epochs": 10,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "ent_coef": 0.0,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "normalize_advantage": true,
+    "target_kl": null,
+    "net_arch": {
+      "pi": [
+        256,
+        256
+      ],
+      "vf": [
+        256,
+        256
+      ]
+    },
+    "activation_fn": "ReLU"
+  },
+  "budget": {
+    "total_env_steps": 200704,
+    "val_every_env_steps": 5000,
+    "val_n_episodes": 20,
+    "checkpoint_every_seconds": 600.0
+  },
+  "budget_overrides": [],
+  "resolved": {
+    "rollout_size": 2048,
+    "n_rollouts": 98
+  },
+  "placeholders_in_use": [],
+  "env": {
+    "env_id": "highway-fast-v0",
+    "config": {
+      "observation": {
+        "type": "Kinematics"
+      },
+      "action": {
+        "type": "DiscreteMetaAction"
+      },
+      "simulation_frequency": 5,
+      "policy_frequency": 1,
+      "other_vehicles_type": "highway_env.vehicle.behavior.IDMVehicle",
+      "screen_width": 600,
+      "screen_height": 150,
+      "centering_position": [
+        0.3,
+        0.5
+      ],
+      "scaling": 5.5,
+      "show_trajectories": false,
+      "render_agent": true,
+      "offscreen_rendering": true,
+      "manual_control": false,
+      "real_time_rendering": false,
+      "neighbour_vehicles_connected_lanes": false,
+      "lanes_count": 3,
+      "vehicles_count": 20,
+      "controlled_vehicles": 1,
+      "initial_lane_id": null,
+      "duration": 30,
+      "ego_spacing": 1.5,
+      "vehicles_density": 0.7,
+      "collision_reward": -1,
+      "right_lane_reward": 0.1,
+      "high_speed_reward": 0.4,
+      "lane_change_reward": 0,
+      "reward_speed_range": [
+        20,
+        30
+      ],
+      "normalize_reward": true,
+      "offroad_terminal": false
+    },
+    "reward": "balanced",
+    "reward_weights": {
+      "w_speed": 0.4,
+      "w_right": 0.1,
+      "w_collision": 20.0,
+      "w_lane": 0.1
+    },
+    "action_index": {
+      "LANE_LEFT": 0,
+      "IDLE": 1,
+      "LANE_RIGHT": 2,
+      "FASTER": 3,
+      "SLOWER": 4
+    },
+    "observation_shape": [
+      5,
+      5
+    ],
+    "near_miss_ttc": 1.5,
+    "reversal_window": 3
+  },
+  "reproducibility": {
+    "git": {
+      "commit": "a3f0c0857bf343499cb4004abde2d0cba8d7ddd2",
+      "dirty": true
+    },
+    "versions": {
+      "python": "3.13.3",
+      "torch": "2.15.0+cpu",
+      "gymnasium": "1.4.0",
+      "highway_env": "1.12.1",
+      "numpy": "2.5.5",
+      "pandas": "3.1.1",
+      "stable_baselines3": "2.9.2"
+    },
+    "os": "Windows-11-10.0.26300-SP0",
+    "cpu_model": "Intel(R) Core(TM) Ultra 9 285H",
+    "logical_cores": 16,
+    "thread_env_vars": {
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1"
+    },
+    "torch_num_threads": 1,
+    "device": "cpu",
+    "workers": 8
+  },
+  "timing": {
+    "start_time": "2026-11-21T22:29:12+00:00",
+    "end_time": "2026-11-21T23:20:43+00:00",
+    "total_wall_s": 3090.6613281000173,
+    "env_time_s": 2184.1776499003754,
+    "update_time_s": 304.2712348999339,
+    "val_time_s": 602.0754354997189,
+    "checkpoint_time_s": 0.1370077999890782,
+    "train_steps_per_s": 80.65425851709232,
+    "post_training_benchmark_s": null,
+    "quiet_benchmark_steps_per_s": null,
+    "final_env_step": 200704,
+    "n_episodes": 6856,
+    "n_updates": 98,
+    "n_val_points": 40
+  },
+  "model": {
+    "n_parameters": 146438
+  },
+  "inference": {
+    "median_ms": 0.0695,
+    "p90_ms": 0.08120999999999999,
+    "mean_ms": 0.06996770000000001,
+    "n": 1000,
+    "warmup": 100,
+    "batch_size": 1,
+    "threads": 1,
+    "n_distinct_observations": 90
+  },
+  "logging": {
+    "update_log_every": 1
+  },
+  "milestones": [],
+  "resumes": [],
+  "calibration": {
+    "purpose": "calibration only; never part of the DDQN vs PPO comparison",
+    "library": "stable-baselines3",
+    "library_version": "2.9.2",
+    "algorithm_note": "SB3 PPO (separate actor and critic MLPs, orthogonal init; SB3 defaults except as listed)",
+    "hyperparameter_sources": {
+      "learning_rate": "calibration task specification (= SB3 default)",
+      "n_envs": "calibration task specification",
+      "n_steps": "calibration task specification",
+      "batch_size": "calibration task specification (= SB3 default)",
+      "n_epochs": "calibration task specification (= SB3 default)",
+      "gamma": "frozen shared decision (common/train_config.py)",
+      "gae_lambda": "calibration task specification (= SB3 default)",
+      "clip_range": "calibration task specification (= SB3 default)",
+      "ent_coef": "calibration task specification (= SB3 default)",
+      "vf_coef": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "max_grad_norm": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "normalize_advantage": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "target_kl": "SB3 2.9.2 default (the HighwayEnv example gives no value)",
+      "net_arch": "frozen shared decision (common/train_config.py) (separate actor and critic, as in the main grid)",
+      "activation_fn": "frozen shared decision (common/train_config.py)"
+    },
+    "validation": {
+      "seeds": "VAL_SEEDS[:20]",
+      "condition": "main",
+      "deterministic": true,
+      "validation_workers": 2
+    },
+    "timing_note": "env_time_s = wall - update - validation - checkpoint (includes SB3 action selection and buffer overhead)",
+    "resume_note": "a resume restarts the in-flight episodes with new derived seeds; not bit-identical (see sb3_train.py)"
+  },
+  "early_warning": {
+    "checked_at_env_step": 100352,
+    "crash_rate": 0.0,
+    "return_own": 4.088792112165999,
+    "random_crash_rate": 0.7,
+    "random_return_own": -10.266711551087907,
+    "random_return_se": 2.072182355205275,
+    "at_random_level": false
+  }
+}

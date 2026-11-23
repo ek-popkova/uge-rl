@@ -1,8 +1,12 @@
-gymnasium>=1.0.0
+# Readable top-level requirements, exact versions. Both team machines must have IDENTICAL versions:
+# install from requirements-lock.txt (full transitive list) and verify with `python scripts/check_env.py`.
+# Python must be 3.13 (reference environment: 3.13.3). Install the CPU build of torch (no GPU is used).
+gymnasium==1.4.0
 highway-env==1.12.1
-torch>=2.2.0
-numpy>=1.26
-pandas>=2.0
-matplotlib>=3.8
-moviepy>=2.0
-tensorboard>=2.15
+torch==2.15.0
+numpy==2.5.5
+pandas==3.1.1
+matplotlib==3.11.2
+moviepy==2.2.1
+tensorboard==2.21.0
+pytest==9.2.0

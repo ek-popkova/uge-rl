@@ -26,6 +26,14 @@ class Agent(ABC):
             An action valid for the environment's action space.
         """
 
+    def start_episode(self, seed: int) -> None:
+        """Hook called by ``common.evaluate`` before every evaluation episode (default: no-op).
+
+        Scripted policies with their own randomness (e.g. the random baseline) re-seed here from
+        the episode seed, so their behaviour does not depend on episode order or worker layout.
+        Learned agents have nothing to do.
+        """
+
     @abstractmethod
     def save(self, path: str) -> None:
         """Save the agent's parameters to ``path``."""
