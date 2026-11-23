@@ -1,0 +1,58 @@
+\section{Reproducibility}\label{app:reproduction}
+
+\paragraph{Resources.}
+Code repository: \todo{URL}. Video of the learned policies: \todo{URL or file in the repository}.
+
+\paragraph{Repository structure.}
+Shared code lives in \code{common/} so both algorithms run under identical environment, reward and
+evaluation conditions (\cref{tab:repo}).
+
+\begin{table}[H]
+  \centering
+  \caption{Repository structure.}
+  \label{tab:repo}
+  \begin{tabularx}{\textwidth}{@{}lX@{}}
+    \toprule
+    Package & Content \\
+    \midrule
+    \code{common/}  & env configuration and factory, reward wrapper, evaluation, metrics, \code{Agent} interface \\
+    \code{ddqn/}    & Double DQN agent and training script \\
+    \code{ppo/}     & PPO agent and training script \\
+    \code{scripts/} & random baseline, video recording \\
+    \code{report/}  & this report (LaTeX) \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\paragraph{Commands.}
+\todo{Exact commands to reproduce each experiment, library versions (\code{requirements.txt}), Python version, seeds, hardware.}
+
+\section{Hyper-parameters}\label{app:hyperparameters}
+
+\begin{table}[H]
+  \centering
+  \caption{Final hyper-parameters.}
+  \label{tab:hyperparameters}
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    Parameter & Symbol & \ddqn{} & \ppo{} \\
+    \midrule
+    Learning rate        & $\alpha$ & -- & -- \\
+    Discount factor      & $\gam$   & -- & -- \\
+    Batch size           &          & -- & -- \\
+    Network architecture &          & -- & -- \\
+    Training steps       &          & 300k & 300k \\
+    \midrule
+    Replay buffer size   &          & -- & n/a \\
+    Target update        & $\tau$ / period & -- & n/a \\
+    $\varepsilon$-schedule &        & -- & n/a \\
+    \midrule
+    Rollout length       &          & n/a & -- \\
+    Epochs / minibatches &          & n/a & -- \\
+    Clip range           & $\epsilon$ & n/a & -- \\
+    GAE parameter        & $\lambda$ & n/a & -- \\
+    Entropy coefficient  &          & n/a & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\todo{Fill in from \code{ddqn/train.py} and \code{ppo/train.py}.}

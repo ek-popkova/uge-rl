@@ -1,0 +1,44 @@
+\section{Problem Formulation (MDP)}\label{sec:problem}
+
+\subsection{Environment configuration}\label{sec:env-config}
+We use \env{highway-v0} from \env{HighwayEnv}~\cite{highway-env}.
+\todo{Document the final configuration; it must match \code{common/config.py}
+(env id, lanes, episode duration, policy and simulation frequency).}
+
+\subsubsection{Observation space}
+\todo{Kinematics observation: number of observed vehicles, features per vehicle, normalisation, relative vs.\ absolute coordinates.}
+
+\subsubsection{Action space}
+\todo{\code{DiscreteMetaAction}: list every action (lane left, idle, lane right, faster, slower) and
+\emph{verify their semantics} in the simulator, as required by the assignment.}
+
+\subsubsection{Termination}
+\todo{Collision (termination), time limit (truncation), off-road if applicable.}
+
+\subsubsection{Default reward}
+\todo{Components of the default HighwayEnv reward: collision, high-speed, right-lane, on-road; how they are
+combined and normalised.}
+
+\subsection{Formal definition}
+The task is a finite-horizon Markov decision process $(\mathcal{S}, \mathcal{A}, P, R, \gam)$ with horizon $T$:
+\begin{itemize}
+  \item $\mathcal{S}$: \todo{dimension and range of the Kinematics observation};
+  \item $\mathcal{A}$: \todo{$|\mathcal{A}| = 5$ discrete meta-actions};
+  \item $P(\state' \mid \state, \action)$: transition kernel given by the simulator dynamics and surrounding-traffic behaviour (stochastic through the initial traffic);
+  \item $R(\state, \action)$: reward function (\cref{sec:reward});
+  \item $\gam \in [0,1)$: discount factor; $T$: horizon, i.e.\ the episode length in decision steps.
+\end{itemize}
+The agent maximises the expected discounted return
+\begin{equation}
+  J(\pol) = \E_{\pol}\!\left[\sum_{t=0}^{T-1} \gam^{t}\, R(\state_t, \action_t)\right].
+  \label{eq:return}
+\end{equation}
+
+\subsection{State of the art}\label{sec:sota-mdp}
+\todo{Draft and extend.}
+\begin{itemize}
+  \item \textbf{Other observation types:} occupancy grids, bird's-eye-view or camera images
+        (\cite{highway-env,kiran2022drl}); trade-off between information content and sample efficiency.
+  \item \textbf{Action abstractions:} discrete meta-actions (delegating low-level control to controllers)
+        vs.\ continuous steering/acceleration control.
+\end{itemize}

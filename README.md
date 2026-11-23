@@ -18,6 +18,7 @@ conditions, so all shared code lives in the `common/` package.
 ├── tests/        # pytest: config, rewards, evaluation protocol, metrics, training harness (RandomTrainer end to end)
 ├── docs/         # config_decisions.md, evaluation_protocol.md, performance_analysis.md
 ├── notebooks/    # analysis notebooks
+├── report/       # LaTeX report (see report/README.md)
 └── results/      # local outputs (ignored by git)
 ```
 
@@ -220,6 +221,11 @@ python -m scripts.record_video --algo ppo --checkpoint results/runs/ppo/balanced
 
 Loading a trained agent (`load_agent` in `scripts/record_video.py`) is a TODO until the agents exist; the scripted
 baselines (`--algo idle`, ...) can be used to try the pipeline.
+
+## Report
+
+The LaTeX report lives in `report/`. Build it with `reportuild.ps1` (Windows) or `report/build.sh`;
+see [report/README.md](report/README.md).
 
 ## Team
 

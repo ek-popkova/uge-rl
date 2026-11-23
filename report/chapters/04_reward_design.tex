@@ -1,0 +1,46 @@
+\section{Reward Design}\label{sec:reward}
+
+\subsection{State of the art}\label{sec:sota-reward}
+\todo{Draft and extend.}
+\begin{itemize}
+  \item \textbf{Reward shaping:} additional reward terms can speed up learning; potential-based shaping
+        preserves optimal policies~\cite{ng1999shaping}, arbitrary shaping does not.
+  \item \textbf{Reward hacking / specification gaming:} agents exploit gaps between the
+        specified reward and the intended behaviour~\cite{amodei2016concrete,krakovna2020gaming}.
+  \item \textbf{Safe RL:} constrained MDPs~\cite{altman1999cmdp} and Lagrangian methods~\cite{achiam2017cpo,ray2019safexp};
+        shielding~\cite{alshiekh2018shielding} filters unsafe actions at run time.
+  \item \textbf{Consequence for this work:} a large collision penalty only changes the \emph{expected return}; it is
+        not a guarantee of collision avoidance.
+\end{itemize}
+
+\subsection{Reward configurations}\label{sec:reward-configs}
+All custom rewards are a weighted sum of terms computed by the reward wrapper (\code{common/rewards.py}):
+\begin{equation}
+  r_t = w_{\mathrm{speed}}\, r^{\mathrm{speed}}_t + w_{\mathrm{col}}\, r^{\mathrm{col}}_t + w_{\mathrm{lane}}\, r^{\mathrm{lane}}_t,
+  \label{eq:reward}
+\end{equation}
+\todo{Define each term precisely: normalised speed reward, collision indicator, lane-change penalty.}
+
+\begin{description}
+  \item[Default] reward of the underlying \env{HighwayEnv}, unchanged.
+  \item[Reward A (efficiency)] emphasises speed and progress, with a collision penalty.
+  \item[Reward B (safety)] weights collision avoidance more and discourages aggressive manoeuvres.
+  \item[Reward C (balanced)] combines speed, safety and smooth driving.
+\end{description}
+
+\begin{table}[H]
+  \centering
+  \caption{Reward weights.}
+  \label{tab:reward-weights}
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Configuration & $w_{\mathrm{speed}}$ & $w_{\mathrm{col}}$ & $w_{\mathrm{lane}}$ \\
+    \midrule
+    Default           & \multicolumn{3}{c}{HighwayEnv default} \\
+    A (efficiency)    & -- & -- & -- \\
+    B (safety)        & -- & -- & -- \\
+    C (balanced)      & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\todo{Final values; must match \code{REWARDS} in \code{common/config.py}.}

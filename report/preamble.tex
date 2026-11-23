@@ -1,0 +1,67 @@
+%% ---------------------------------------------------------------------------
+%% Packages, layout and macros. Content lives in chapters/, metadata in main.tex.
+%% ---------------------------------------------------------------------------
+
+%% Fonts and language
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[english]{babel}
+\usepackage{microtype}
+
+%% Layout
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{indentfirst}
+\usepackage{setspace}
+\onehalfspacing
+\emergencystretch=2em % avoid overfull lines with long names in monospace
+
+%% Math
+\usepackage{amsmath, amssymb, mathtools}
+
+%% Figures and tables
+\usepackage{graphicx}
+\graphicspath{{figures/}} % \includegraphics{learning_curves} -> figures/learning_curves.(pdf|png)
+\usepackage{float}        % [H] placement
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+
+%% Algorithms and code listings
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{gray},
+}
+
+%% Links -- hyperref must be loaded late, cleveref after it
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage[capitalise, noabbrev]{cleveref} % \cref{fig:x} -> "Figure 1"
+
+%% ---------------------------------------------------------------------------
+%% Macros
+%% ---------------------------------------------------------------------------
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}} % visible placeholder
+\newcommand{\env}[1]{\texttt{#1}}                           % \env{highway-v0}
+\newcommand{\code}[1]{\texttt{#1}}                          % file / identifier names
+\newcommand{\ddqn}{Double DQN}
+\newcommand{\ppo}{PPO}
+
+%% RL notation
+\DeclareMathOperator*{\argmax}{arg\,max}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\state}{s}
+\newcommand{\action}{a}
+\newcommand{\Q}{Q}
+\newcommand{\pol}{\pi}
+\newcommand{\gam}{\gamma}
+\newcommand{\thetat}{\theta^{-}} % target network parameters
