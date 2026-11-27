@@ -1,36 +1,124 @@
 \section{Problem Formulation (MDP)}\label{sec:problem}
 
 \subsection{Environment configuration}\label{sec:env-config}
-We use \env{highway-v0} from \env{HighwayEnv}~\cite{highway-env}.
-\todo{Document the final configuration; it must match \code{common/config.py}
-(env id, lanes, episode duration, policy and simulation frequency).}
+We use the highway task of \env{HighwayEnv}~\cite{highway-env} in its faster variant \env{highway-fast-v0}. It shares
+the road, vehicle dynamics, observation, actions, termination and reward with \env{highway-v0}, but simulates the
+physics at 5\,Hz instead of 15\,Hz, checks collisions only for the ego vehicle, and changes the defaults to 3 lanes,
+20 vehicles, 30\,s episodes and an initial ego spacing of 1.5 (\env{highway-v0}: 4 lanes, 50 vehicles, 40\,s, 2). At
+20 vehicles it ran about 2.5 times faster per step in our measurements, which made five training seeds per
+configuration affordable within the 300k-step budget. To check that the coarser physics does not change the task, we
+evaluate every model also on \env{highway-v0} with the configuration of \cref{tab:env-config} (including the ego
+spacing of 1.5), at 15\,Hz and with collisions between other vehicles enabled (the \emph{precise} test condition,
+\cref{sec:eval-protocol}); for the scripted baselines, crash rates differ by at most 3
+percentage points and mean speeds by at most 0.12\,m/s between the two variants. \Cref{tab:env-config} lists the
+configuration; it matches \code{BASE\_CONFIG} and \code{DENSITIES} in \code{common/config.py}.
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Environment configuration.}
+  \label{tab:env-config}
+  \begin{tabularx}{\linewidth}{@{}lXX@{}}
+    \toprule
+    Parameter & Value & Note \\
+    \midrule
+    Environment          & \env{highway-fast-v0} & training and all test conditions except \emph{precise} \\
+    Lanes                & 3 & default of \env{highway-fast-v0} \\
+    Other vehicles       & 20 & default of \env{highway-fast-v0} \\
+    Episode duration     & 30\,s $=$ 30 decision steps & default of \env{highway-fast-v0} \\
+    Policy frequency     & 1\,Hz & one decision per second \\
+    Simulation frequency & 5\,Hz & default of the fast variant \\
+    Traffic density      & low 0.4, medium 0.7, high 1.0 & \code{vehicles\_density}; training at medium \\
+    Ego initial speed    & 25\,m/s & set by the environment \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The densities were chosen on scripted policies before any agent was trained. At medium density the default cruising
+policy (idle) crashed in 54\% of the 50 pilot episodes while a policy that only slows down never crashed, so the
+trade-off between speed and safety is present; low density is easy and high density is hard but still feasible for the
+slow policy. On the 100 test episodes idle crashes in 71\% (\cref{tab:baselines}); the difference lies within
+the sampling noise of 50 pilot episodes, whose 95\% interval is about 40--67\%.
 
 \subsubsection{Observation space}
-\todo{Kinematics observation: number of observed vehicles, features per vehicle, normalisation, relative vs.\ absolute coordinates.}
+The observation is the \env{Kinematics} observation of \env{HighwayEnv} with default settings: a $5 \times 5$ array with
+one row for the ego vehicle and one for each of the four nearest other vehicles within 200\,m ahead (vehicles up to
+about two vehicle lengths behind the ego also qualify), sorted by distance. Each row holds the features presence, $x$,
+$y$, $v_x$ and $v_y$. The ego row holds the ego's own values (its normalized $x$ saturates at 1); positions and
+velocities of the other vehicles are relative to the ego vehicle, and all features are normalized to $[-1, 1]$ and clipped ($x$ by $\pm 200$\,m, $y$ by $\pm 12$\,m,
+velocities by $\pm 80$\,m/s). Rows without a vehicle are zero. Both algorithms flatten the array into a 25-dimensional
+input without further normalization. With three lanes, the leader in the ego lane is hidden by the four-vehicle limit
+in 0\% of the steps at low and medium density and in 2\% at high density.
 
 \subsubsection{Action space}
-\todo{\code{DiscreteMetaAction}: list every action (lane left, idle, lane right, faster, slower) and
-\emph{verify their semantics} in the simulator, as required by the assignment.}
+The action space is \code{DiscreteMetaAction} with five meta-actions, executed by low-level steering and speed
+controllers. We verified their semantics in the simulator (\cref{tab:actions}).
 
-\subsubsection{Termination}
-\todo{Collision (termination), time limit (truncation), off-road if applicable.}
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Meta-actions and their effect, verified in \env{HighwayEnv}~1.12.1.}
+  \label{tab:actions}
+  \begin{tabularx}{\linewidth}{@{}clX@{}}
+    \toprule
+    Index & Action & Effect \\
+    \midrule
+    0 & \code{LANE\_LEFT}  & change to the adjacent left lane; the lane index changes within one decision step; no effect in the leftmost lane \\
+    1 & \code{IDLE}       & keep the lane and the current target speed \\
+    2 & \code{LANE\_RIGHT} & change to the adjacent right lane; no effect in the rightmost lane \\
+    3 & \code{FASTER}     & raise the target speed to the next of $\{20, 25, 30\}$\,m/s; no effect at 30\,m/s \\
+    4 & \code{SLOWER}     & lower the target speed to the previous of $\{20, 25, 30\}$\,m/s; no effect at 20\,m/s \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Lanes are numbered 0 (leftmost) to 2 (rightmost). The speed controller reaches a new target speed within one to two
+decision steps (for example $25.0 \to 29.3 \to 29.9$\,m/s after \code{FASTER}). An action that has no effect is still
+accepted, so the agent can choose it, and our metrics count the lane changes that actually happened rather than the
+chosen actions.
+
+\subsubsection{Termination}\label{sec:termination}
+An episode terminates when the ego vehicle collides with another vehicle, and is truncated when the time limit of
+30\,s is reached. Leaving the road is not a termination condition (\code{offroad\_terminal} is off). In training, only
+a collision is treated as a terminal state; at a truncation the value of the next state is bootstrapped, because the
+observation does not contain the remaining time.
 
 \subsubsection{Default reward}
-\todo{Components of the default HighwayEnv reward: collision, high-speed, right-lane, on-road; how they are
-combined and normalised.}
+The default reward of \env{HighwayEnv} combines four components, each in $[0,1]$: a collision indicator $c_t$, a
+high-speed term $r^{\mathrm{speed}}_t$ (forward speed mapped linearly from $[20, 30]$\,m/s to $[0,1]$ and clipped), a
+right-lane term $r^{\mathrm{right}}_t$ (the index of the target lane divided by the number of lanes minus one, so 1 in
+the rightmost lane) and an on-road indicator:
+\begin{equation}
+  \tilde{r}_t = -c_t + 0.4\, r^{\mathrm{speed}}_t + 0.1\, r^{\mathrm{right}}_t,
+  \qquad
+  r_t = \frac{\tilde{r}_t + 1}{1.5}\; \mathbb{1}[\text{on road}].
+  \label{eq:default-reward}
+\end{equation}
+The weighted sum is mapped linearly from $[-1, 0.5]$ to $[0, 1]$. The lane-change weight is 0 by default and is not
+used by the environment in version 1.12.1. Because of the normalization, a step without collision earns at least
+0.667, and even the step of a collision earns a small non-negative reward, so surviving is rewarded in itself;
+\cref{sec:reward-configs} explains why the custom rewards do not use this normalization.
 
 \subsection{Formal definition}
-The task is a finite-horizon Markov decision process $(\mathcal{S}, \mathcal{A}, P, R, \gam)$ with horizon $T$:
+We treat the task as a discounted Markov decision process $(\mathcal{S}, \mathcal{A}, P, R, \gam)$ over the
+observations, with episodes truncated after $T$ steps. Strictly, the observation is a partial view of the traffic and
+the 30\,s limit is not part of it, so the task is partially observable and the Markov property holds only
+approximately; this is why the time limit is treated as a truncation rather than a terminal state
+(\cref{sec:termination}).
 \begin{itemize}
-  \item $\mathcal{S}$: \todo{dimension and range of the Kinematics observation};
-  \item $\mathcal{A}$: \todo{$|\mathcal{A}| = 5$ discrete meta-actions};
-  \item $P(\state' \mid \state, \action)$: transition kernel given by the simulator dynamics and surrounding-traffic behaviour (stochastic through the initial traffic);
-  \item $R(\state, \action)$: reward function (\cref{sec:reward});
-  \item $\gam \in [0,1)$: discount factor; $T$: horizon, i.e.\ the episode length in decision steps.
+  \item $\mathcal{S}$: the \env{Kinematics} observation, a $5 \times 5$ array with entries in $[-1, 1]$ (25
+        features). It is a partial view of the traffic, since only the four nearest vehicles ahead are observed;
+  \item $\mathcal{A}$: the five meta-actions of \cref{tab:actions}, $|\mathcal{A}| = 5$;
+  \item $P(\state' \mid \state, \action)$: the simulator dynamics and the behavior of the other vehicles (IDM car
+        following and MOBIL lane changes with randomized parameters), stochastic through the initial traffic and the
+        behavior parameters;
+  \item $R(\state, \action, \state')$: the default reward~\eqref{eq:default-reward} or one of the custom rewards of
+        \cref{sec:reward}; it depends on the outcome of the step (collision, completed lane change);
+  \item $\gam = 0.99$ for both algorithms; $T = 30$ decision steps (60 in the \emph{long} test condition).
 \end{itemize}
-The agent maximises the expected discounted return
+The agent maximizes the expected discounted return
 \begin{equation}
-  J(\pol) = \E_{\pol}\!\left[\sum_{t=0}^{T-1} \gam^{t}\, R(\state_t, \action_t)\right].
+  J(\pol) = \E_{\pol}\!\left[\sum_{t=0}^{T-1} \gam^{t}\, R(\state_t, \action_t, \state_{t+1})\right].
   \label{eq:return}
 \end{equation}
 

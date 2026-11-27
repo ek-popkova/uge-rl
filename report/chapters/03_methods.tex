@@ -1,20 +1,39 @@
 \section{Methods}\label{sec:methods}
 
 \subsection{Baselines}\label{sec:baseline}
-\begin{itemize}
-  \item \textbf{Random policy:} uniform over the discrete actions.
-  \item \textbf{Always-IDLE policy:} simple heuristic that keeps lane and speed. \todo{optional}
-\end{itemize}
-\todo{Why these baselines: they give the reference performance that learned policies must beat.}
+Four scripted policies give the reference performance that learned policies must beat: \emph{random} (uniform over the
+five actions, seeded per episode), \emph{idle} (always \code{IDLE}, i.e.\ the environment's cruising behavior at
+25\,m/s), \emph{slower} (always \code{SLOWER}, settling at 20\,m/s) and \emph{faster} (always \code{FASTER}, settling at
+30\,m/s). They are evaluated with the same pipeline, test episodes and metrics as the agents (\cref{sec:protocol}).
+\Cref{tab:baselines} gives their results on the training condition.
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Scripted baselines on the \emph{main} condition (medium density, 100 test episodes; Wilson 95\% intervals
+  over episodes).}
+  \label{tab:baselines}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Policy & Collision rate & Completed & Mean speed [m/s] & Collisions per km \\
+    \midrule
+    random & 80\% (71--87\%) & 20\%  & 24.9 & 2.07 \\
+    idle   & 71\% (61--79\%) & 29\%  & 24.7 & 1.28 \\
+    slower & 0\% (0--4\%)    & 100\% & 20.0 & 0.00 \\
+    faster & 99\% (95--100\%) & 1\%  & 28.8 & 2.83 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The table shows the two trivial extremes the agents have to improve on: \emph{slower} is perfectly safe but slow,
+\emph{faster} is fast but almost always crashes, and the default cruising policy crashes in most episodes. A learned
+policy is useful only if it is faster than \emph{slower} and safer than \emph{idle} at the same time, which requires
+changing lanes to avoid slow traffic.
 
 \subsection{Double DQN}\label{sec:ddqn}
 
 \paragraph{State of the art.}
-DQN~\cite{mnih2015dqn} approximates the action-value function with a neural network, using experience
-replay and a target network. It overestimates action values because the same network selects and evaluates
-the maximising action; Double DQN~\cite{vanhasselt2016ddqn} decouples the two. Further extensions include
-dueling architectures~\cite{wang2016dueling}, prioritised experience replay~\cite{schaul2016per} and their
-combination in Rainbow~\cite{hessel2018rainbow}.
+\todo{Draft with verified references: DQN, overestimation bias and Double DQN~\cite{vanhasselt2016ddqn}, extensions (dueling networks, prioritised replay, Rainbow).}
 
 \paragraph{Our implementation.}
 The action-value function $\Q(\state, \action; \theta)$ is a neural network (\todo{architecture}). The TD target is
@@ -33,30 +52,223 @@ or soft with $\tau$), $\varepsilon$-greedy schedule, optimiser, gradient clippin
 \subsection{Proximal Policy Optimization}\label{sec:ppo}
 
 \paragraph{State of the art.}
-Policy-gradient methods start from REINFORCE~\cite{williams1992reinforce}; actor-critic methods reduce the
-variance with a learned baseline (A2C/A3C~\cite{mnih2016a3c}); TRPO~\cite{schulman2015trpo} constrains the
-policy update with a trust region, and PPO~\cite{schulman2017ppo} approximates this with a clipped objective.
-Generalised Advantage Estimation (GAE)~\cite{schulman2016gae} trades bias against variance in the advantage estimate.
 
-\paragraph{Our implementation.}
-An actor-critic network (\todo{shared or separate layers}) outputs a categorical policy $\pol_\theta(\action \mid \state)$ and a state value $V_\phi(\state)$. The policy maximises
+\subparagraph{Policy-gradient foundations.}
+Policy-based methods parameterize a stochastic policy $\pi_\theta(a \mid s)$ directly and improve it by gradient
+ascent on the expected return. Sutton et al.~\cite{sutton2000pg} contrast this with value-based control, where a small
+change in an estimated action value can switch the greedy action discontinuously; with a parameterized policy, small
+changes in $\theta$ change the policy smoothly. Their policy gradient theorem gives, with $d^{\pi}$ the discounted state
+distribution (up to a constant factor when $d^{\pi}$ is normalized),
 \begin{equation}
-  \mathcal{L}^{\mathrm{CLIP}}(\theta) =
-  \E_t\Bigl[\min\bigl(\rho_t(\theta)\hat{A}_t,\ \mathrm{clip}(\rho_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\bigr)\Bigr],
-  \quad
-  \rho_t(\theta) = \frac{\pol_\theta(\action_t \mid \state_t)}{\pol_{\theta_{\mathrm{old}}}(\action_t \mid \state_t)},
-  \label{eq:ppo-clip}
+  \nabla_\theta J(\theta) = \mathbb{E}_{s \sim d^{\pi},\, a \sim \pi_\theta}\bigl[\nabla_\theta \log \pi_\theta(a \mid s)\, Q^{\pi}(s,a)\bigr].
+  \label{eq:pg-theorem}
 \end{equation}
-with advantages from GAE,
+Replacing $Q^{\pi}$ with the sampled Monte Carlo return gives REINFORCE~\cite{williams1992reinforce}. Subtracting a
+state-dependent baseline, commonly an estimate of $V^{\pi}(s)$, keeps the estimator unbiased and can substantially
+reduce its variance~\cite{williams1992reinforce,sutton2000pg}. Actor-critic methods also use the critic inside the
+learning target, by bootstrapping, for example through the TD error
+$\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$; this lowers variance at the cost of introducing
+bias~\cite{konda2000actorcritic,schulman2016gae}. Sutton and Barto~\cite[Sec.~13.5]{sutton2018rl} use this
+bootstrapping, not the learned baseline alone, to separate REINFORCE with a baseline from actor-critic methods.
+A3C~\cite{mnih2016a3c} is an actor-critic with $n$-step advantages and an entropy bonus; A2C is its synchronous,
+batched variant~\cite{wu2017acktr}.
+
+Generalized Advantage Estimation (GAE)~\cite{schulman2016gae} interpolates between the Monte Carlo and the one-step TD
+advantage estimates with a parameter $\lambda$:
 \begin{equation}
-  \hat{A}_t = \sum_{l=0}^{T-t-1} (\gam\lambda)^l \delta_{t+l},
+  \hat{A}_t = \delta_t + \gamma\lambda\,(1-m_{t+1})\,\hat{A}_{t+1},
   \qquad
-  \delta_t = r_t + \gam V_\phi(\state_{t+1}) - V_\phi(\state_t),
+  \delta_t = r_t + \gamma\,(1-m^{\mathrm{term}}_{t+1})\,V(s_{t+1}) - V(s_t).
   \label{eq:gae}
 \end{equation}
-plus a value-function loss and an entropy bonus.
-\todo{Rollout length, number of epochs and minibatches, $\epsilon$, $\lambda$, entropy and value coefficients,
-advantage normalisation, optimiser.}
+Here $m_{t+1}=1$ when the episode ends after step $t$, for any reason, so the recursion never accumulates terms from
+the next episode in the same rollout; $m^{\mathrm{term}}_{t+1}=1$ only for a true termination (a collision in
+HighwayEnv), where $V(s_{t+1})$ is set to zero, whereas after a time-limit truncation the value of the last state is
+still bootstrapped (Andrychowicz et al.~\cite{andrychowicz2021matters} study this choice). Within an episode the
+recursion unrolls to the truncated sum $\hat{A}_t = \sum_{l=0}^{T'-t-1} (\gamma\lambda)^l \delta_{t+l}$, where $T'$ is
+the end of the episode or of the rollout, as used by PPO~\cite{schulman2017ppo}. $\lambda = 0$ gives the one-step TD
+advantage and $\lambda = 1$ the Monte Carlo return minus the baseline, bootstrapped at the end of the rollout if the
+episode continues; intermediate values ($\lambda$ between 0.9 and 0.99) usually worked best in the original
+experiments~\cite{schulman2016gae}.
+
+\subparagraph{From trust regions to PPO.}
+The main practical difficulty of policy gradients is the step size: a single update that is too large can collapse
+the policy~\cite{schulman2015trpo,schulman2017ppo}, and the next batch is then collected with the degraded policy.
+Kakade~\cite{kakade2002npg} replaces the ordinary gradient, which depends on the parameterization, with the natural
+gradient $F(\theta)^{-1}\nabla_\theta J$, where $F$ is the Fisher information of the policy. Building on the
+performance-difference identity of Kakade and Langford~\cite{kakade2002approximately}, Schulman et
+al.~\cite{schulman2015trpo} prove that maximizing a surrogate objective minus a penalty proportional to the maximum KL
+divergence over states guarantees monotonic improvement. Because the theoretical penalty coefficient yields very
+small steps, TRPO replaces the penalty with a KL constraint, and because constraining the KL at every state is
+impractical, it constrains the average KL divergence instead:
+\begin{equation}
+  \max_\theta\; \hat{\mathbb{E}}_t\!\left[\frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}\hat{A}_t\right]
+  \quad \text{s.t.} \quad
+  \hat{\mathbb{E}}_t\!\left[\mathrm{KL}\bigl(\pi_{\theta_{\mathrm{old}}}(\cdot \mid s_t)\,\|\,\pi_\theta(\cdot \mid s_t)\bigr)\right] \le \delta_{\mathrm{KL}},
+  \label{eq:trpo}
+\end{equation}
+where $\hat{\mathbb{E}}_t$ denotes the empirical average over the collected batch, and solves it approximately with a
+natural-gradient step computed by conjugate gradient and a backtracking line search.
+
+PPO~\cite{schulman2017ppo} keeps the trust-region idea with first-order optimization only, which permits parameter
+sharing between the policy and value networks; the clipped or penalized surrogate makes it practical to run several
+epochs of minibatch updates on each batch. PPO-Clip maximizes a pessimistic clipped surrogate:
+\begin{equation}
+  \begin{aligned}
+  L^{\mathrm{CLIP}}(\theta) &= \hat{\mathbb{E}}_t\Bigl[\min\bigl(\rho_t(\theta)\hat{A}_t,\;
+  \mathrm{clip}(\rho_t(\theta), 1-\epsilon_{\mathrm{clip}}, 1+\epsilon_{\mathrm{clip}})\hat{A}_t\bigr)\Bigr],\\
+  \rho_t(\theta) &= \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t \mid s_t)}.
+  \end{aligned}
+  \label{eq:ppo-clip}
+\end{equation}
+PPO-KL instead adds a penalty $\beta\,\mathrm{KL}(\pi_{\theta_{\mathrm{old}}} \,\|\, \pi_\theta)$ and halves or doubles
+$\beta$ when the measured KL falls below $d_{\mathrm{targ}}/1.5$ or exceeds $1.5\,d_{\mathrm{targ}}$. A value-function
+loss term is required when the policy and value networks share parameters, and an entropy bonus can be added to
+sustain exploration; both variants estimate advantages with truncated GAE. In the original ablation on seven
+continuous-control tasks, run without parameter sharing or entropy bonus and scored so that a random policy gives 0
+and the best result per task 1, removing clipping and penalty altogether gave the worst score ($-0.39$); clipping
+scored 0.76, 0.82 and 0.70 for $\epsilon_{\mathrm{clip}} = 0.1$, 0.2 and 0.3, the adaptive KL penalty 0.68--0.74 and a
+fixed KL penalty 0.62--0.72. On Atari, with discrete actions, the same paper used $\epsilon_{\mathrm{clip}} = 0.1$
+annealed linearly to zero. These settings are the reference points for our sensitivity analysis of
+$\epsilon_{\mathrm{clip}}$, with the caveat that the ablation used Gaussian policies. The clipped objective was later
+reused by GRPO~\cite{shao2024deepseekmath} for language-model fine-tuning, where the critic is replaced by rewards
+normalized by the mean and standard deviation of a group of samples from the same prompt; this requires a group of
+rollouts from the same state for every update, and we do not use it.
+
+A separate family of off-policy actor-critics (DDPG~\cite{lillicrap2016ddpg}, TD3~\cite{fujimoto2018td3},
+SAC~\cite{haarnoja2018sac}) reuses a replay buffer but was originally formulated for continuous actions; a
+discrete-action variant of SAC exists~\cite{christodoulou2019sacdiscrete}. Given HighwayEnv's discrete meta-actions
+and the project scope, we restrict ourselves to the on-policy family.
+
+\subparagraph{Implementation details and the role of PPO-KL.}
+PPO's performance depends strongly on implementation details. Engstrom et al.~\cite{engstrom2020implementation}
+ablate four code-level optimizations of the reference implementation (value-function clipping, reward scaling,
+orthogonal initialization and learning-rate annealing) and show that they matter more for the final reward than the
+choice between the PPO and TRPO update rules, so they may explain much of PPO's reported advantage over TRPO. They also
+show that clipping does not keep the probability ratio inside $[1-\epsilon_{\mathrm{clip}}, 1+\epsilon_{\mathrm{clip}}]$:
+it removes the incentive to move further but does not bound an individual step. In a large-scale study of on-policy
+design choices, Andrychowicz et al.~\cite{andrychowicz2021matters} found the PPO loss more robust than plain
+policy-gradient losses when data are reused for several epochs, recommended observation normalization and a small
+initialization of the final policy layer, found separate policy and value networks better in four of five
+environments, and found that PPO-style value-function clipping hurt performance. Both studies used continuous-control
+benchmarks, so their recommendations serve as defaults rather than guarantees for HighwayEnv.
+
+Hsu et al.~\cite{hsu2020revisiting} show in a bandit test that clipping can fail with softmax policies when the action
+set is large: with 100 actions, clipped PPO converged to a suboptimal action in about half of the runs, whereas with a
+fixed reverse-KL penalty it always reached the optimum and with the forward-KL penalty of the original PPO paper it
+failed in about 20\% of runs (their Fig.~8). They note that Atari's 3--18 actions are too few to expose this failure,
+and in their test clipped PPO did not fail with 10 actions, so with HighwayEnv's five meta-actions we do not expect it.
+We include PPO-KL for a different reason: it is the alternative trust-region mechanism proposed in the original PPO
+paper, where it performed somewhat worse than clipping~\cite{schulman2017ppo}, and comparing the two under the same
+budget complements the sensitivity analysis of $\epsilon_{\mathrm{clip}}$ by showing how much our results depend on
+clipping specifically.
+
+\subparagraph{Expected trade-offs against Double DQN.}
+The assignment recommends an actor-critic such as PPO because it contrasts with Double DQN in learning stability and
+sample efficiency. The literature suggests the following expectations, which our experiments test.
+\begin{itemize}
+  \item \textbf{Sample efficiency and compute.} PPO is on-policy: each batch is used for a few epochs and then
+  discarded, whereas Double DQN reuses transitions from a replay buffer many times (\cref{sec:ddqn}). On-policy methods
+  therefore need new samples for every update and are generally less sample-efficient~\cite{haarnoja2018sac}, which
+  matters under our fixed budget of 300k environment steps. The computational cost per environment step also differs
+  and depends on hyper-parameters. Counted as per-sample gradient evaluations per environment step, PPO performs about
+  $K$, the number of epochs (10 in the original MuJoCo setting, 3 on Atari), while Double DQN performs about the batch
+  size divided by the update interval (32 for a batch of 32 updated at every step), plus forward passes of the target
+  network. PPO's lower sample
+  efficiency therefore does not imply higher compute per environment step, and wall-clock training time is measured
+  separately.
+  \item \textbf{Stability.} PPO discourages large policy changes but does not strictly bound
+  them~\cite{engstrom2020implementation}. Its critic is regressed on $\lambda$-returns $\hat{A}_t + V(s_t)$ computed
+  from on-policy data, with no maximization over actions, so it does not have the overestimation bias that Double DQN
+  is designed to reduce~\cite{vanhasselt2016ddqn}. However, PPO can converge prematurely to a poor but stable policy:
+  in a lane-change study it converged to a trivial policy in two of six scenarios~\cite{sun2024lanechange}.
+  \item \textbf{Exploration.} PPO explores by sampling from its own stochastic policy, kept from collapsing by an
+  entropy bonus~\cite{mnih2016a3c,schulman2017ppo}, so exploration decreases as the policy becomes confident. Double
+  DQN acts $\varepsilon$-greedily with respect to its Q-values, with the rate $\varepsilon_{\mathrm{greedy}}$ annealed by
+  an external schedule. The two mechanisms are tuned through different hyper-parameters (entropy coefficient vs
+  $\varepsilon_{\mathrm{greedy}}$ schedule), which is relevant for the sensitivity analysis.
+\end{itemize}
+
+\subparagraph{Policy-based methods on highway and lane-change tasks.}
+Kiran et al.~\cite{kiran2022drl} review policy-gradient, actor-critic, TRPO and PPO methods as background for RL in
+autonomous driving and note that DQN-type algorithms work only with discrete action spaces, whereas continuous
+actuators can be handled by algorithms that learn a policy directly. In its default configuration
+(\texttt{DiscreteMetaAction}), HighwayEnv~\cite{highway-env} frames tactical highway driving with five discrete
+meta-actions executed by low-level controllers~\cite{leurent2020thesis}, so both value-based and policy-based methods
+apply without discretizing steering or throttle. The studies we identified that compare PPO or TRPO with other deep RL
+algorithms on lane-change and highway tasks are summarized in \cref{tab:ppo-sota-studies}.
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Studies comparing PPO or TRPO with other deep RL algorithms on lane-change and highway tasks.}
+  \label{tab:ppo-sota-studies}
+  \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.13\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.13\linewidth}>{\raggedright\arraybackslash}X@{}}
+    \toprule
+    Study & Task and actions & Algorithms & Main finding \\
+    \midrule
+    Dong et al.~\cite{dong2023comprehensive}
+      & highway-env merge, roundabout, intersection, racetrack (plus a custom map); steering $\times$ acceleration,
+        discretized for DQN
+      & DQN vs TRPO
+      & TRPO performed somewhat better in most scenarios; the highway scene was not tested \\
+    Sun \& Yu~\cite{sun2024lanechange}
+      & SUMO 5-lane freeway; discrete lane-change permissions per 100\,m lane cell (multi-agent)
+      & Double DQN vs PPO
+      & PPO learned faster (150k steps) but converged to a trivial policy in 2 of 6 traffic scenarios; converged Double
+        DQN raised average speed in all six relative to the SUMO default (IDM/SL2015) baseline, with 1--3\% higher
+        CO$_2$ in five of six \\
+    Yao et al.~\cite{yao2024comparison}
+      & Cooperative 2-lane change; continuous accelerations
+      & DDPG, TD3, SAC, PPO
+      & PPO learned fastest and scored best on safety and comfort; SAC did not converge \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The results do not give a consistent ranking of value-based and policy-based methods. Wang et
+al.~\cite{wang2024autonomous} describe DQN and PPO set-ups in HighwayEnv but report results only for DQN, as a learning
+curve in the merge task. Among the studies reviewed, none compares PPO with Double DQN on the HighwayEnv highway scene
+with discrete meta-actions, which is the setting of this work.
+
+\subparagraph{Summary of the on-policy methods.}
+The methods differ in how they estimate the advantage, how often they reuse a batch, and how they limit the size of a
+policy update (\cref{tab:ppo-sota-methods}).
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{On-policy policy-gradient methods considered in this work.}
+  \label{tab:ppo-sota-methods}
+  \begin{tabularx}{\linewidth}{@{}*{5}{>{\raggedright\arraybackslash}X}@{}}
+    \toprule
+    Method & Advantage estimate & Updates per batch & Limit on policy update & Optimization \\
+    \midrule
+    REINFORCE + baseline~\cite{williams1992reinforce}
+      & Monte Carlo return minus $V(s)$, no bootstrapping & One gradient step & None & 1st order \\
+    A2C~\cite{wu2017acktr}, the synchronous variant of A3C~\cite{mnih2016a3c}
+      & $n$-step bootstrapped advantage & One gradient step & None & 1st order \\
+    TRPO~\cite{schulman2015trpo}
+      & Monte Carlo Q-estimates (GAE in~\cite{schulman2016gae}) & One constrained step
+      & Hard average-KL constraint, line search & Natural gradient (conjugate gradient) \\
+    PPO-Clip~\cite{schulman2017ppo}
+      & GAE & Several epochs of minibatches & Clipped probability ratio & 1st order \\
+    PPO-KL~\cite{schulman2017ppo}
+      & GAE & Several epochs of minibatches & Adaptive KL penalty & 1st order \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\paragraph{Our implementation.}
+A policy network outputs a categorical policy $\pol_\theta(\action \mid \state)$ over the five meta-actions, and a
+separate value network of the same size outputs $V_\phi(\state)$ (\cref{sec:protocol}). The policy maximizes the
+clipped surrogate~\eqref{eq:ppo-clip}, with advantages from the masked GAE recursion~\eqref{eq:gae} computed with
+$V_\phi$; a collision ends the bootstrap and a time-limit truncation does not (\cref{sec:termination}). The loss adds a
+value-function term, fitting $V_\phi$ to the $\lambda$-returns $\hat{A}_t + V_\phi(\state_t)$, and an entropy bonus.
+The PPO-KL variant replaces the clipped surrogate with the adaptive KL penalty described above.
+\todo{Target-KL early stopping of the epochs (if used); rollout length, number of epochs and minibatches,
+$\epsilon_{\mathrm{clip}}$, $\lambda$, $d_{\mathrm{targ}}$, entropy and value coefficients, advantage normalization,
+optimizer.}
 
 \subsection{Value-based vs.\ policy-based learning}\label{sec:vb-vs-pb}
 \todo{Theoretical comparison, the frame for \cref{sec:res-ddqn-ppo}:}

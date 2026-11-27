@@ -3,46 +3,149 @@
 \subsection{Common settings}
 Both algorithms are trained under identical conditions:
 \begin{itemize}
-  \item \textbf{Training budget:} 300k environment steps per model.
-  \item \textbf{Environment:} configuration of \cref{sec:env-config}, identical for both algorithms.
-  \item \textbf{Seeds:} \todo{number of training seeds and their values}.
-  \item \textbf{Compute:} CPU cores limited to \todo{N} on both machines, so that wall-clock times are comparable at least in order of magnitude.
+  \item \textbf{Training budget:} 300,000 environment steps per model, the same for both algorithms; every run trains
+        for the full budget (no early stopping).
+  \item \textbf{Environment:} the configuration of \cref{sec:env-config} at medium density, identical for both
+        algorithms.
+  \item \textbf{Network:} an MLP with two hidden layers of 256 units and ReLU for the \ddqn{} Q-network and the \ppo{}
+        actor ($25 \to 256 \to 256 \to 5$, 73,733 parameters); the \ppo{} critic is a separate network of the same size.
+        $\gam = 0.99$ for both.
+  \item \textbf{Seeds:} five training seeds (0--4) per algorithm and reward, so 2 algorithms $\times$ 4 rewards
+        $\times$ 5 seeds $=$ 40 models in the main grid. Validation and test episodes use their own disjoint seed sets
+        (20 validation seeds, 100 test seeds), and the seeds of the vectorized training environments are derived so
+        that they never coincide with them.
+  \item \textbf{Compute:} \ddqn{} and \ppo{} were trained on two different machines, one algorithm per machine, with
+        the same library versions and at most eight simulator processes running at the same time on each.
 \end{itemize}
 
 \subsection{Evaluation protocol}\label{sec:eval-protocol}
 \begin{itemize}
-  \item Evaluation episodes are separate from training: no parameter updates, fixed evaluation seeds shared by both algorithms (\code{EVAL\_SEEDS} in \code{common/config.py}).
-  \item Number of evaluation episodes per checkpoint: \todo{N}. Intermediate evaluation every \todo{K} training steps.
-  \item Policy at evaluation time: \todo{deterministic (greedy / mode) or stochastic}; the same rule for both algorithms.
+  \item \textbf{Validation during training:} every 12,000 environment steps, the current policy is run on the same 20
+        validation episodes, giving 25 points per learning curve. The $x$-axis of every curve is environment steps.
+  \item \textbf{Final evaluation:} the final checkpoint of each model is evaluated once on 100 test episodes per test
+        condition, with the same episode seeds for every model, so all models face identical starting situations.
+        Nothing is selected on the test episodes.
+  \item \textbf{Policy at evaluation:} deterministic for both algorithms (greedy action for \ddqn{}, most probable
+        action for \ppo{}), without learning or exploration.
+  \item \textbf{Test conditions:} all evaluation-only (\cref{tab:test-conditions}).
 \end{itemize}
 
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Test conditions.}
+  \label{tab:test-conditions}
+  \begin{tabularx}{\linewidth}{@{}lXX@{}}
+    \toprule
+    Condition & Differs from training & Purpose \\
+    \midrule
+    \emph{main}    & nothing (new episodes) & headline result \\
+    \emph{low}     & density 0.4 & generalization to easier traffic \\
+    \emph{high}    & density 1.0 & generalization to harder traffic \\
+    \emph{long}    & 60\,s episodes, 30 vehicles & does the policy keep driving safely for longer? \\
+    \emph{precise} & \env{highway-v0}, 15\,Hz physics, collisions between other vehicles
+                   & dependence on the coarse physics of the fast variant \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+All models are trained under the same condition (medium density), so \ddqn{} and \ppo{} are compared under identical
+training conditions, and their generalization is tested on the unseen low and high densities. Training separate models
+at every density would triple the number of runs and is outside our compute budget. Because crash risk per km
+grows over a 60\,s episode even for scripted policies, results on \emph{long} are compared with the baselines on the
+same condition, not with a model's own \emph{main} result.
+
 \subsection{Metrics}\label{sec:metrics}
+All metrics are recorded per episode:
 \begin{itemize}
-  \item \textbf{Return:} cumulative episode reward.
-  \item \textbf{Mean speed} (m/s) and \textbf{distance travelled} per episode.
-  \item \textbf{Completion rate:} fraction of episodes without early termination.
-  \item \textbf{Collision rate:} collisions per episode; \textbf{collision-free rate:} fraction of episodes with no collision.
-  \item \textbf{Near-collision frequency:} fraction of steps in which \todo{define explicitly: time-to-collision below $\tau$ s, or distance to the nearest vehicle below $d$ m}.
-  \item \textbf{Lane-change frequency:} lane changes per episode.
+  \item \textbf{Return:} undiscounted episode return under the training reward, and under every other reward
+        recomputed from the same episode. Returns are compared only within one reward.
+  \item \textbf{Mean speed} (m/s) and \textbf{distance travelled} (m).
+  \item \textbf{Completion rate:} share of episodes that reach the time limit without a collision.
+  \item \textbf{Collision rate:} share of episodes that end in a collision (at most one collision per episode, since a
+        collision terminates the episode); the \textbf{collision-free rate} is its complement. \textbf{Collisions per
+        km} are aggregated as total collisions over total distance.
+  \item \textbf{Near-collision:} an episode without a collision in which the time-to-collision with the vehicle ahead
+        in the ego lane fell below 1.5\,s; we also count the steps with time-to-collision below 1.5\,s. The threshold
+        was fixed before training. Only the leader in the ego lane is considered, so cut-ins and conflicts with
+        vehicles behind are not captured.
+  \item \textbf{Lane behavior:} lane changes per episode (actual changes of the lane index), lane-change reversals
+        (a change undone within 3 steps), share of time in the rightmost lane, and the histogram of chosen actions.
+  \item \textbf{Overtakes per km:} vehicles ahead of the ego at the start and behind it at the end, divided by the
+        distance.
 \end{itemize}
 
 \subsubsection{Hardware-independent computational cost}
-Environment steps to reach a target return, number of gradient updates, and number of network parameters.
-Wall-clock training and inference times are reported only with the caveat that they were measured on
-different machines.
+Wall-clock times cannot be compared between the algorithms, because \ddqn{} and \ppo{} were trained on different
+machines. We therefore compare quantities that do not depend on the hardware:
+\begin{itemize}
+  \item \textbf{Environment steps to a target performance} and \textbf{to the plateau} of the learning curve. Two
+        target levels were fixed before training, each requiring a safety and a speed condition on the validation
+        episodes at three consecutive validation points: \emph{beats\_idle} (collision rate below 0.6 and mean speed
+        above 24.8\,m/s, i.e.\ strictly better than idle on both) and \emph{strong} (collision rate at most 0.4 and
+        mean speed at least 25.5\,m/s). No scripted baseline reaches either level. The plateau is computed on the
+        validation return under the run's own reward: the final level is the mean over the last 20\% of the
+        validation points, the improvement is the final level minus the first validation value, and the plateau point
+        is the earliest validation point from which the rolling mean over five points stays within $0.1 \times$ the
+        improvement of the final level. A plateau point inside the last 20\% of the curve is reported as censored.
+  \item \textbf{Gradient computation:} the number of gradient updates and of samples processed by them per
+        environment step.
+  \item \textbf{Inference cost:} at evaluation both policies are a single forward pass through the same
+        $25 \to 256 \to 256 \to 5$ network (the \ddqn{} Q-network or the \ppo{} actor), i.e.\ 73,216
+        multiply-accumulate operations per decision, so their inference cost is identical by construction.
+\end{itemize}
+Wall-clock training time and measured inference time (median over 1,000 single-observation calls on one CPU thread)
+are reported per machine, together with the machine description, and are used only to compare runs of the same
+algorithm.
 
 \subsection{Hyper-parameter selection}\label{sec:hp-selection}
-\todo{Procedure (which parameters were tuned, on which reward/density, how many seeds), search ranges,
-selection criterion. Final values for both algorithms are in \cref{app:hyperparameters}.}
+Shared settings (budget, network, $\gam$, validation schedule) are fixed for both algorithms. Each algorithm's own
+hyper-parameters were tuned with the same budget: at most four configurations (the defaults plus up to three
+variations), one run each with a dedicated tuning seed that is never used for results, on the balanced reward at
+medium density, evaluated on the validation episodes only. The configuration with the highest mean balanced return
+over the last three validation points was selected, ties broken by the lower collision rate. Hyper-parameter
+sensitivity is then studied one parameter at a time around the selected values, with three seeds per setting on the
+balanced reward: the learning rate at 1/3 and 3 times its value for both algorithms, the duration of the
+$\varepsilon$ decay $\pm 0.2$ of the budget for \ddqn{}, and the clipping parameter $\pm 0.1$ for \ppo{}. The base
+setting is the corresponding main-grid run, so the sensitivity study adds 24 runs. Tuning used a single seed and only the balanced reward, and the selected values are used for all
+rewards; this is a limitation of the budget. Final values for both algorithms are in \cref{app:hyperparameters}.
 
 \subsection{Statistical methodology}\label{sec:stats}
 \paragraph{State of the art.}
 Results of deep RL depend strongly on random seeds and implementation details~\cite{henderson2018matters}.
-Reporting only mean over few runs can be misleading; robust aggregate statistics such as the interquartile
+Reporting only the mean over a few runs can be misleading; robust aggregate statistics such as the interquartile
 mean with bootstrapped confidence intervals are recommended~\cite{agarwal2021rliable}.
 
 \paragraph{Our protocol.}
-\todo{State how results are aggregated across seeds (mean $\pm$ std, IQM, confidence intervals) and why.}
+The training seed is the unit of analysis. For each model we average the metrics over its 100 test episodes; across
+the five seeds we report the mean with a two-sided 95\% Student-$t$ interval ($t = 2.776$ for five seeds) and always
+show the individual runs next to it. We use the $t$-interval rather than a bootstrap because a bootstrap over five
+values cannot leave the observed range and underestimates the uncertainty when the standard deviation itself is
+estimated from so few runs. Baselines have no training seed, so their intervals are Wilson intervals over episodes.
+Five seeds support only coarse conclusions~\cite{patterson2024empirical}; differences within the intervals are not
+interpreted.
 
 \subsection{Experiments}
-\todo{List of experiments and how each maps to a subsection of \cref{sec:results}.}
+\Cref{tab:experiments} maps the experiments to the subsections of \cref{sec:results}.
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Experiments.}
+  \label{tab:experiments}
+  \begin{tabularx}{\linewidth}{@{}XXl@{}}
+    \toprule
+    Experiment & Runs & Results \\
+    \midrule
+    \ddqn{} vs.\ \ppo{}, learning curves, efficiency, safety
+      & main grid: 2 algorithms $\times$ 4 rewards $\times$ 5 seeds $=$ 40
+      & \cref{sec:res-ddqn-ppo,sec:res-curves,sec:res-efficiency,sec:res-safety} \\
+    Reward design & the same 40 models, compared across rewards & \cref{sec:res-reward} \\
+    Traffic density & the same 40 models on low and high density & \cref{sec:res-density} \\
+    Hyper-parameter sensitivity & 24 runs (4 settings $\times$ 3 seeds per algorithm) & \cref{sec:res-hp} \\
+    Qualitative behavior & videos of the same test episodes for both algorithms, early and final checkpoints
+      & \cref{sec:res-qualitative} \\
+    Computational cost & all runs & \cref{sec:res-compute} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
