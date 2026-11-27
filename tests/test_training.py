@@ -8,6 +8,7 @@ import math
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from common.actions import ACTION_INDEX
 from common.aggregate import auc_across_seeds, curve_auc, learning_curve_table, steps_to_threshold
@@ -51,27 +52,36 @@ from common.train_logging import (
 )
 from common.training import SimulatedInterrupt, TrainingRun, resolve_setup
 from ddqn.train import DDQNTrainer
+from ppo.agent import PPOAgent
+from ppo.train import PPOTrainer
 
 TIME_COLUMNS = {
     "wall_s", "train_wall_s", "update_time_s", "cum_env_time_s", "cum_update_time_s", "cum_val_time_s",
     "cum_checkpoint_time_s",
 }
 TOTAL = 80
+# PPO_ARGS below: rollout 2 x 10 = 20, minibatch 10, default n_epochs -> Adam steps per rollout
+PPO_STEPS_PER_ROLLOUT = PPOConfig().n_epochs * (20 // 10)
 
 DDQN_ARGS = ["--total-steps", str(TOTAL), "--val-every", "40", "--val-episodes", "2", "--checkpoint-every", "30",
              "--update-log-every", "2"]
 PPO_ARGS = ["--set", "n_envs=2", "--set", "n_steps=10", "--set", "minibatch_size=10", "--total-steps", str(TOTAL),
             "--val-every", "40", "--val-episodes", "2", "--checkpoint-every", "40", "--update-log-every", "1"]
 ALGO_ARGS = {"ddqn": DDQN_ARGS, "ppo": PPO_ARGS}
+# The end-to-end runs: key -> (algorithm, trainer). "ddqn" / "ppo" exercise the harness with the RandomTrainer test
+# double; "ppo_trainer" runs the real PPOTrainer through the same harness and the same tests (CLAUDE.md test checklist).
+RUNS = {"ddqn": ("ddqn", RandomTrainer), "ppo": ("ppo", RandomTrainer), "ppo_trainer": ("ppo", PPOTrainer)}
+N_PARAMETERS = {"ddqn": 4, "ppo": 4, "ppo_trainer": 73_733 + 72_705}  # RandomTrainer fakes 4 parameters
 
 
-def run_random(root, algo, *, workers=1, benchmark_steps=0, interrupt=None, resume=False):
+def run_harness(root, key, *, workers=1, benchmark_steps=0, interrupt=None, resume=False, extra=()):
+    algo, trainer_cls = RUNS[key]
     argv = ["--reward", "balanced", "--seed", "0", "--out-dir", str(root), "--workers", str(workers),
-            "--benchmark-steps", str(benchmark_steps), *ALGO_ARGS[algo]]
+            "--benchmark-steps", str(benchmark_steps), *ALGO_ARGS[algo], *extra]
     if resume:
         argv.append("--resume")
     setup = resolve_setup(algo, argv)
-    TrainingRun(setup, RandomTrainer, interrupt_at_env_step=interrupt, quiet=True).run()
+    TrainingRun(setup, trainer_cls, interrupt_at_env_step=interrupt, quiet=True).run()
     return setup.run_dir
 
 
@@ -92,17 +102,19 @@ def runs(tmp_path_factory):
     """The runs shared by the end-to-end tests (each is a few seconds of real simulation)."""
     root = tmp_path_factory.mktemp("runs")
     out = {
-        "ddqn": run_random(root / "ddqn", "ddqn", benchmark_steps=20),
-        "ppo": run_random(root / "ppo", "ppo"),
+        "ddqn": run_harness(root / "ddqn", "ddqn", benchmark_steps=20),
+        "ppo": run_harness(root / "ppo", "ppo"),
+        "ppo_trainer": run_harness(root / "ppo_trainer", "ppo_trainer"),
     }
     return out
 
 
 # ---- end to end -------------------------------------------------------------------------------------------------------
 @pytest.mark.slow
-@pytest.mark.parametrize("algo", ["ddqn", "ppo"])
-def test_all_files_exist_with_the_right_schema(runs, algo):
-    d = runs[algo]
+@pytest.mark.parametrize("key", list(RUNS))
+def test_all_files_exist_with_the_right_schema(runs, key):
+    algo = RUNS[key][0]
+    d = runs[key]
     for name in ("train_log.csv", "update_log.csv", "val_log.csv", "run_meta.json", "final.pt", "resume.pt",
                  "milestone_10pct.pt", "milestone_25pct.pt", "milestone_50pct.pt"):
         assert (d / name).exists(), name
@@ -115,13 +127,22 @@ def test_all_files_exist_with_the_right_schema(runs, algo):
     # algorithm-specific update metrics belong to one algorithm only
     other = "ppo" if algo == "ddqn" else "ddqn"
     assert not set(UPDATE_ALGO_METRICS[other]) & set(logs["update"].columns)
-    assert not logs["update"][UPDATE_ALGO_METRICS[algo]].isna().any().any()  # RandomTrainer reports every metric
+    if key == "ppo_trainer":  # PPO-Clip reports every metric except kl_beta, which it does not have
+        reported = [m for m in UPDATE_ALGO_METRICS[algo] if m != "kl_beta"]
+        assert logs["update"]["kl_beta"].isna().all()
+        # one row per rollout; it counts the rollout's Adam steps: 10 epochs x (rollout 20 / minibatch 10) = 20
+        assert len(logs["update"]) == TOTAL // 20 and logs["update"]["updates_in_row"].eq(PPO_STEPS_PER_ROLLOUT).all()
+        assert list(logs["update"]["update_idx"]) == [PPO_STEPS_PER_ROLLOUT * (i + 1) for i in range(TOTAL // 20)]
+    else:
+        reported = UPDATE_ALGO_METRICS[algo]  # RandomTrainer reports every metric
+    assert not logs["update"][reported].isna().any().any()
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("algo", ["ddqn", "ppo"])
-def test_env_step_is_the_monotonic_x_axis(runs, algo):
-    logs = read_logs(runs[algo])
+@pytest.mark.parametrize("key", list(RUNS))
+def test_env_step_is_the_monotonic_x_axis(runs, key):
+    algo = RUNS[key][0]
+    logs = read_logs(runs[key])
     for name in ("train", "update", "val"):
         steps = logs[name]["env_step"].to_numpy()
         assert (np.diff(steps) >= 0).all() and steps.max() <= TOTAL, name
@@ -137,15 +158,17 @@ def test_env_step_is_the_monotonic_x_axis(runs, algo):
         assert set(train["vec_env"]) <= {0, 1}
         assert all(s % 2 == 0 for s in train["env_step"])  # env steps are summed over the 2 vector envs
         assert list(val["env_step"]) == [40, 80]  # first rollout boundary at or after each multiple of 40
+        assert list(logs["update"]["env_step"]) == [20, 40, 60, 80]  # one update per rollout of 2 x 10
     else:
         assert set(train["vec_env"]) == {0} and list(val["env_step"]) == [40, 80]
         assert len(logs["update"]) == (TOTAL // 10) // 2 and logs["update"]["updates_in_row"].eq(2).all()
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("algo", ["ddqn", "ppo"])
-def test_run_meta_has_every_field(runs, algo):
-    meta = json.loads((runs[algo] / "run_meta.json").read_text())
+@pytest.mark.parametrize("key", list(RUNS))
+def test_run_meta_has_every_field(runs, key):
+    algo = RUNS[key][0]
+    meta = json.loads((runs[key] / "run_meta.json").read_text())
     template = new_meta({})
     assert set(meta) == set(template)
     assert set(meta["timing"]) == set(template["timing"])
@@ -175,10 +198,18 @@ def test_run_meta_has_every_field(runs, algo):
     t = meta["timing"]
     assert t["final_env_step"] == TOTAL and t["start_time"] and t["end_time"] and t["total_wall_s"] > 0
     assert t["env_time_s"] > 0 and t["val_time_s"] > 0 and t["checkpoint_time_s"] > 0 and t["train_steps_per_s"] > 0
-    assert t["n_episodes"] == len(read_logs(runs[algo])["train"]) and t["n_val_points"] == 2 and t["n_updates"] > 0
+    assert t["n_episodes"] == len(read_logs(runs[key])["train"]) and t["n_val_points"] == 2 and t["n_updates"] > 0
+    # gradient updates count optimizer steps and samples their minibatch sizes, the same units for both algorithms
+    if algo == "ppo":  # 4 rollouts x 20 Adam steps; each epoch processes the 20 transitions of a rollout once
+        assert t["n_updates"] == (TOTAL // 20) * PPO_STEPS_PER_ROLLOUT
+        assert t["n_gradient_samples"] == (TOTAL // 20) * PPOConfig().n_epochs * 20
+    else:  # RandomTrainer's fake DDQN: one step on one batch per call
+        assert t["n_gradient_samples"] == t["n_updates"] * DDQNConfig().batch_size
+    if key == "ppo_trainer":
+        assert t["update_time_s"] > 0
     if algo == "ddqn":  # the quiet benchmark was requested only for this run
         assert t["quiet_benchmark_steps_per_s"] > 0
-    assert meta["model"]["n_parameters"] == 4
+    assert meta["model"]["n_parameters"] == N_PARAMETERS[key]
     inf = meta["inference"]
     assert inf["median_ms"] > 0 and inf["p90_ms"] >= inf["median_ms"] and inf["batch_size"] == 1 and inf["threads"] == 1
     assert [m["fraction"] for m in meta["milestones"]] == [0.1, 0.25, 0.5] and meta["logging"]["update_log_every"] in (1, 2)
@@ -195,22 +226,32 @@ def test_milestone_and_final_checkpoints_are_loadable_agents(runs):
     assert agent.seed == 0
     agent.load(str(runs["ppo"] / "final.pt"))
     assert agent.seed == 0
+    # the real PPO run: final and milestone checkpoints are PPOAgent files, and they differ (the policy was trained)
+    obs = (0.3 * np.random.default_rng(0).standard_normal((32, 5, 5))).astype(np.float32)
+    final, early = PPOAgent(), PPOAgent()
+    final.load(str(runs["ppo_trainer"] / "final.pt"))
+    early.load(str(runs["ppo_trainer"] / "milestone_10pct.pt"))
+    with torch.no_grad():
+        logits_final = final.actor(torch.as_tensor(obs.reshape(32, 25)))
+        logits_early = early.actor(torch.as_tensor(obs.reshape(32, 25)))
+    assert not torch.equal(logits_final, logits_early)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("algo, interrupt", [("ddqn", 50), ("ppo", 60)])
-def test_resume_reproduces_the_uninterrupted_run(runs, tmp_path, algo, interrupt):
+@pytest.mark.parametrize("key, interrupt", [("ddqn", 50), ("ppo", 60), ("ppo_trainer", 60)])
+def test_resume_reproduces_the_uninterrupted_run(runs, tmp_path, key, interrupt):
+    algo = RUNS[key][0]
     with pytest.raises(SimulatedInterrupt):
-        run_random(tmp_path, algo, interrupt=interrupt)
-    d = run_dir(algo, "balanced", 0, tmp_path, runs[algo].parent.name)
+        run_harness(tmp_path, key, interrupt=interrupt)
+    d = run_dir(algo, "balanced", 0, tmp_path, runs[key].parent.name)
     meta = json.loads((d / "run_meta.json").read_text())
     assert meta["status"] == "failed" and "SimulatedInterrupt" in meta["error"]  # also written on a crash
     first_ckpt = 30 if algo == "ddqn" else 40
     before = read_logs(d)
     assert before["update"]["env_step"].max() > first_ckpt  # rows beyond the checkpoint exist and must be dropped
-    resumed = run_random(tmp_path, algo, resume=True)
+    resumed = run_harness(tmp_path, key, resume=True)
     assert resumed == d
-    assert_same_logs(d, runs[algo])  # no duplicates, same rows as the uninterrupted run
+    assert_same_logs(d, runs[key])  # no duplicates, same rows as the uninterrupted run
     meta = json.loads((d / "run_meta.json").read_text())
     assert meta["status"] == "finished" and meta["timing"]["final_env_step"] == TOTAL
     assert len(meta["resumes"]) == 1 and meta["resumes"][0]["env_step"] == first_ckpt
@@ -218,15 +259,48 @@ def test_resume_reproduces_the_uninterrupted_run(runs, tmp_path, algo, interrupt
     assert meta["timing"]["start_time"]  # kept from the first start
     assert not read_logs(d)["train"]["env_step"].diff().dropna().lt(0).any()
     # a finished run is not touched by --resume
-    run_random(tmp_path, algo, resume=True)
-    assert_same_logs(d, runs[algo])
+    run_harness(tmp_path, key, resume=True)
+    assert_same_logs(d, runs[key])
 
 
 @pytest.mark.slow
-def test_logs_identical_for_one_and_two_workers(runs, tmp_path):
-    two = run_random(tmp_path, "ppo", workers=2)  # AsyncVectorEnv (subprocesses) and a validation pool
-    assert_same_logs(two, runs["ppo"])
+@pytest.mark.parametrize("key", ["ppo", "ppo_trainer"])
+def test_logs_identical_for_one_and_two_workers(runs, tmp_path, key):
+    two = run_harness(tmp_path, key, workers=2)  # AsyncVectorEnv (subprocesses) and a validation pool
+    assert_same_logs(two, runs[key])
     assert json.loads((two / "run_meta.json").read_text())["reproducibility"]["workers"] == 2
+
+
+@pytest.mark.slow
+def test_ppo_trainer_is_reproducible_for_a_fixed_seed(runs, tmp_path):
+    again = run_harness(tmp_path, "ppo_trainer")
+    assert_same_logs(again, runs["ppo_trainer"])
+    a = torch.load(again / "final.pt", weights_only=True)["actor_state_dict"]
+    b = torch.load(runs["ppo_trainer"] / "final.pt", weights_only=True)["actor_state_dict"]
+    assert all(torch.equal(a[name], b[name]) for name in a)
+
+
+@pytest.mark.slow
+def test_ppo_eval_agent_is_picklable_and_validates_with_workers(runs):
+    import pickle
+
+    agent = PPOAgent()
+    agent.load(str(runs["ppo_trainer"] / "final.pt"))
+    agent = pickle.loads(pickle.dumps(agent))
+    one = validate(agent, n=2, reward="balanced", workers=1)
+    two = validate(agent, n=2, reward="balanced", workers=2)  # the agent is pickled to the worker processes
+    assert one == two and set(one) <= set(VAL_LOG_COLUMNS)
+
+
+@pytest.mark.slow
+def test_ppo_kl_run_logs_a_finite_kl_beta(tmp_path):
+    d = run_harness(tmp_path, "ppo_trainer", extra=["--set", "policy_loss=kl"])
+    assert d.parent.name == "minibatch_size=10,n_envs=2,n_steps=10,policy_loss=kl"
+    update = read_logs(d)["update"]
+    assert len(update) == TOTAL // 20 and update["kl_beta"].notna().all()
+    # beta starts at 1.0 and is halved / doubled / kept once per update: always a power of 2
+    assert all(math.log2(b).is_integer() for b in update["kl_beta"])
+    assert not update.drop(columns=["kl_beta"]).isna().any().any()
 
 
 @pytest.mark.slow
@@ -236,7 +310,7 @@ def test_existing_run_is_protected_unless_overwrite_or_resume(runs, tmp_path):
     d = run_dir("ddqn", "balanced", 0, tmp_path)
     shutil.copytree(runs["ddqn"], d)
     with pytest.raises(FileExistsError):
-        run_random(tmp_path, "ddqn")
+        run_harness(tmp_path, "ddqn")
 
 
 def test_stub_trainers_raise_before_anything_is_written(tmp_path):
@@ -271,10 +345,32 @@ def test_configs_validate_gamma_and_comparable_network_size():
     check_comparable(DDQNConfig(), PPOConfig())
     with pytest.raises(ValueError):
         PPOConfig(minibatch_size=10_000)
+    with pytest.raises(ValueError, match="must divide"):  # rollout 1,000 / 300 leaves a short last minibatch
+        PPOConfig(minibatch_size=300)
+    with pytest.raises(ValueError, match="must divide"):
+        PPOConfig(n_envs=2, n_steps=8, minibatch_size=5)
+    PPOConfig(minibatch_size=250), PPOConfig(minibatch_size=1_000), PPOConfig(n_envs=2, n_steps=8, minibatch_size=4)
     with pytest.raises(ValueError):
         TrainBudget(val_n_episodes=len(VAL_SEEDS) + 1)
     with pytest.raises(ValueError):
         TrainBudget(val_every_env_steps=10**9)
+
+
+def test_ppo_policy_loss_and_kl_fields_are_validated_and_listed():
+    cfg = PPOConfig()
+    assert cfg.policy_loss == "clip" and cfg.kl_target == 0.01 and cfg.kl_beta_init == 1.0
+    PPOConfig(policy_loss="kl")
+    for bad in ({"policy_loss": "clipped"}, {"policy_loss": "KL"}, {"kl_target": 0.0}, {"kl_target": -0.01},
+                {"kl_beta_init": 0.0}, {"kl_beta_init": -1.0}):
+        with pytest.raises(ValueError):
+            PPOConfig(**bad)
+    names = placeholders_in_use(cfg)
+    for decided in ("policy_loss", "kl_target", "kl_beta_init"):  # decided defaults (the PPO paper's KL values)
+        assert f"PPOConfig.{decided}" not in names
+    assert parse_set_args(["policy_loss=kl", "kl_target=0.03", "kl_beta_init=0.5"], PPOConfig) == {
+        "policy_loss": "kl", "kl_target": 0.03, "kl_beta_init": 0.5}
+    assert variant_name({"policy_loss": "kl"}) == "policy_loss=kl"
+    assert PPOConfig.from_dict(PPOConfig(policy_loss="kl").to_dict()).policy_loss == "kl"
 
 
 def test_config_json_round_trip_and_set_overrides():
@@ -406,6 +502,54 @@ def test_update_aggregation_keeps_spikes_and_every_metric_has_one_rule(tmp_path)
     assert row["updates_in_row"] == 5 and row["update_idx"] == 5 and row["env_step"] == 5
     with pytest.raises(KeyError):
         log.log_update(6, grad_norm_max=1.0)  # derived by the logger, not reported by algorithms
+
+
+def test_ppo_update_schema_has_ratio_max_kl_beta_and_kl_after_update(tmp_path):
+    ppo = UPDATE_ALGO_METRICS["ppo"]
+    assert ppo[-3:] == ["ratio_max", "kl_beta", "kl_after_update"]  # appended at the end, existing columns keep their order
+    assert ppo[:-3] == ["policy_loss", "value_loss", "entropy", "approx_kl", "clip_fraction", "explained_variance",
+                        "n_epochs_done"]
+    assert UPDATE_LOG_COLUMNS["ppo"][-3:] == ["ratio_max", "kl_beta", "kl_after_update"]
+    assert UPDATE_AGG["ratio_max"] == "max" and UPDATE_AGG["kl_beta"] == "last" and UPDATE_AGG["kl_after_update"] == "mean"
+    log = TrainLogger(tmp_path, "ppo", Timers(), update_log_every=3)
+    for i, (r, beta, kl) in enumerate([(1.2, 1.0, 0.01), (4.0, 2.0, 0.05), (1.1, 0.5, 0.03)]):
+        log.log_update(i + 1, lr=1e-4, loss=0.0, grad_norm=1.0, ratio_max=r, kl_beta=beta, kl_after_update=kl)
+    for i in range(3):  # PPO-Clip: kl_beta is NaN in every call
+        log.log_update(10 + i, lr=1e-4, loss=0.0, grad_norm=1.0, ratio_max=1.5, kl_beta=math.nan, kl_after_update=0.02)
+    log.flush()
+    rows = pd.read_csv(tmp_path / "update_log.csv")
+    assert rows.loc[0, "ratio_max"] == 4.0 and rows.loc[0, "kl_beta"] == 0.5  # max / last
+    assert rows.loc[0, "kl_after_update"] == pytest.approx(0.03)  # mean of 0.01, 0.05, 0.03
+    assert rows.loc[1, "ratio_max"] == 1.5 and math.isnan(rows.loc[1, "kl_beta"])
+    assert rows.loc[1, "kl_after_update"] == pytest.approx(0.02)
+    with pytest.raises(KeyError):
+        TrainLogger(tmp_path / "d", "ddqn", Timers()).log_update(1, ratio_max=1.0)  # PPO-only column
+
+
+def test_logger_counts_gradient_updates_and_samples_and_resumes_them(tmp_path):
+    log = TrainLogger(tmp_path / "a", "ppo", Timers(), update_log_every=1)
+    log.log_update(20, n_updates=100, n_samples=10_000, lr=1e-4, loss=0.0, grad_norm=1.0)  # one PPO rollout
+    log.log_update(40, n_updates=40, n_samples=4_000, lr=1e-4, loss=0.0, grad_norm=1.0)  # target-KL stopped early
+    log.flush()
+    rows = pd.read_csv(tmp_path / "a" / "update_log.csv")
+    assert list(rows["updates_in_row"]) == [100, 40] and list(rows["update_idx"]) == [100, 140]
+    assert log.update_idx == 140 and log.sample_idx == 14_000
+    resumed = TrainLogger(tmp_path / "b", "ppo", Timers())
+    resumed.load_state_dict(log.state_dict())
+    assert resumed.update_idx == 140 and resumed.sample_idx == 14_000
+    old_checkpoint = {k: v for k, v in log.state_dict().items() if k != "sample_idx"}  # written before the counter existed
+    resumed.load_state_dict(old_checkpoint)
+    assert resumed.sample_idx is None  # unknown, never a silently wrong count
+    # one call without n_samples makes the total unknown for the rest of the run
+    partial = TrainLogger(tmp_path / "c", "ddqn", Timers())
+    partial.log_update(1, n_samples=64, lr=1e-3, loss=0.0, grad_norm=1.0)
+    partial.log_update(2, lr=1e-3, loss=0.0, grad_norm=1.0)
+    partial.log_update(3, n_samples=64, lr=1e-3, loss=0.0, grad_norm=1.0)
+    assert partial.update_idx == 3 and partial.sample_idx is None
+    with pytest.raises(ValueError):
+        partial.log_update(4, n_updates=0, lr=1e-3, loss=0.0, grad_norm=1.0)
+    with pytest.raises(ValueError):
+        partial.log_update(4, n_updates=10, n_samples=5, lr=1e-3, loss=0.0, grad_norm=1.0)
 
 
 def test_logger_close_emits_a_partial_window_only_on_normal_end(tmp_path):
@@ -662,9 +806,8 @@ def test_video_script_cli_resolves_seeds_and_registry(tmp_path):
     assert resolve_seeds(p.parse_args(["--algo", "ppo", "--episodes", "2"])) == [10000, 10001]
     with pytest.raises(ValueError):
         resolve_seeds(p.parse_args(["--algo", "ppo", "--seeds", "1", "--from-eval-csv", str(csv)]))
-    for algo in ("ddqn", "ppo"):
-        with pytest.raises(NotImplementedError):
-            load_agent(algo, "final.pt")
+    with pytest.raises(NotImplementedError):
+        load_agent("ddqn", "final.pt")  # the PPO loader is tested in tests/test_ppo.py
     assert load_agent("idle", "").act(None) == ACTION_INDEX["IDLE"]
 
 
@@ -679,11 +822,11 @@ def test_inference_benchmark_protocol():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("algo", ["ddqn", "ppo"])
-def test_run_meta_records_the_machine_and_the_onedrive_flag(runs, algo):
+@pytest.mark.parametrize("key", list(RUNS))
+def test_run_meta_records_the_machine_and_the_onedrive_flag(runs, key):
     from common import run_meta as rm
 
-    repro = rm.read_meta(runs[algo] / "run_meta.json")["reproducibility"]
+    repro = rm.read_meta(runs[key] / "run_meta.json")["reproducibility"]
     assert repro["hostname"] == rm.hostname() and repro["cpu_model"]  # wall times are only compared within one machine
     assert isinstance(repro["onedrive_path"], bool)
 
@@ -693,7 +836,7 @@ def test_a_run_inside_onedrive_prints_a_prominent_warning_but_runs(tmp_path, mon
     from common import run_meta as rm
 
     monkeypatch.setattr(rm, "is_onedrive_path", lambda path, environ=None: True)
-    run_dir_ = run_random(tmp_path, "ddqn")
+    run_dir_ = run_harness(tmp_path, "ddqn")
     err = capsys.readouterr().err
     assert "WARNING" in err and "OneDrive" in err and "move the project out of OneDrive" in err
     meta = rm.read_meta(run_dir_ / "run_meta.json")

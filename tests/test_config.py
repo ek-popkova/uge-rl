@@ -119,4 +119,4 @@ def test_harness_refuses_calibration_seed():
 
     for variant in ("main", "tune-a", "lr=0.001"):
         with pytest.raises(ValueError, match="reserved for the SB3 calibration"):
-            check_run_roles(variant, 98, "balanced", "medium", [], [])
+            check_run_roles(variant, 98, "balanced", "medium", {}, [], algo="ddqn")

@@ -114,17 +114,18 @@ def test_tuning_variant_names_and_exclusion_flag():
 
 
 def test_check_run_roles():
-    ok = dict(variant="tune-a", seed=PILOT_RUN_SEED, reward="balanced", density="medium", overridden=["lr"],
-              budget_overrides=[])
+    ok = dict(variant="tune-a", seed=PILOT_RUN_SEED, reward="balanced", density="medium", overrides={"lr": 1e-3},
+              budget_overrides=[], algo="ddqn")
     check_run_roles(**ok)
-    check_run_roles("main", 0, "safety", "low", [], [])  # an ordinary run is untouched
+    check_run_roles("main", 0, "safety", "low", {}, [], algo="ddqn")  # an ordinary run is untouched
     for change, match in (({"seed": 0}, "seed"), ({"reward": "safety"}, "reward"), ({"density": "low"}, "density"),
-                          ({"overridden": ["gamma"]}, "shared"), ({"overridden": ["lr", "hidden_sizes"]}, "shared"),
+                          ({"overrides": {"gamma": 0.995}}, "shared"),
+                          ({"overrides": {"lr": 1e-3, "hidden_sizes": (64, 64)}}, "shared"),
                           ({"budget_overrides": ["total_env_steps"]}, "budget")):
         with pytest.raises(ValueError, match=match):
             check_run_roles(**{**ok, **change})
     with pytest.raises(ValueError, match="reserved"):  # run seed 99 never writes into main or a sensitivity variant
-        check_run_roles("main", PILOT_RUN_SEED, "balanced", "medium", [], [])
+        check_run_roles("main", PILOT_RUN_SEED, "balanced", "medium", {}, [], algo="ddqn")
 
 
 def test_resolve_setup_enforces_the_tuning_roles(tmp_path):
@@ -409,10 +410,12 @@ def test_training_run_checks_a_sensitivity_run_against_an_existing_main_run(tmp_
     write_meta(run_meta_path("ppo", "balanced", 0, tmp_path), _meta("ppo", hp_changes={"vf_coef": 1.0}))
     with pytest.raises(ValueError, match="vf_coef"):
         tr._check_against_main_run(meta)
-    # runs outside the sensitivity role (here two overridden keys, a debug variant) are not checked
-    debug = resolve_setup("ppo", ["--set", "n_envs=2", "--set", "n_steps=10", "--set", "minibatch_size=10",
-                                  "--out-dir", str(tmp_path)])
+    # a debug run (budget overrides, three overridden keys) is not a sensitivity run and is not checked
+    debug_args = ["--set", "n_envs=2", "--set", "n_steps=10", "--set", "minibatch_size=10", "--out-dir", str(tmp_path)]
+    debug = resolve_setup("ppo", [*debug_args, "--total-steps", "1000", "--val-every", "500"])
     TrainingRun(debug, object, quiet=True)._check_against_main_run(_meta("ppo"))
+    with pytest.raises(ValueError, match="not a registered run"):  # the same variant with the frozen budget is refused
+        resolve_setup("ppo", debug_args)
 
 
 # ---- video episodes --------------------------------------------------------------------------------------------------------
