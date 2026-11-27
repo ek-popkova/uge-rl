@@ -71,13 +71,17 @@ class RandomTrainer(Trainer):
             u = self.rng.random(8)
         self.n_fake_updates += 1
         common = {"lr": ctx.cfg.lr, "loss": loss, "grad_norm": float(u[0])}
-        if ctx.algo == "ddqn":
-            ctx.log_update(**common, td_loss=loss, q_mean=float(u[1]), q_max=float(u[2]) + 1.0,
-                           target_q_mean=float(u[3]), epsilon=max(0.05, 1.0 - ctx.env_step / 1000), buffer_size=ctx.env_step)
-        else:
-            ctx.log_update(**common, policy_loss=float(u[1]), value_loss=float(u[2]), entropy=float(u[3]),
-                           approx_kl=float(u[4]) * 0.01, clip_fraction=float(u[5]), explained_variance=float(u[6]),
-                           n_epochs_done=ctx.cfg.n_epochs)
+        cfg = ctx.cfg
+        if ctx.algo == "ddqn":  # one fake gradient step on one batch
+            ctx.log_update(n_updates=1, n_samples=cfg.batch_size, **common, td_loss=loss, q_mean=float(u[1]),
+                           q_max=float(u[2]) + 1.0, target_q_mean=float(u[3]),
+                           epsilon=max(0.05, 1.0 - ctx.env_step / 1000), buffer_size=ctx.env_step)
+        else:  # one fake rollout update: n_epochs passes over rollout_size samples in minibatches, as PPOTrainer counts it
+            ctx.log_update(n_updates=cfg.n_epochs * (cfg.rollout_size // cfg.minibatch_size),
+                           n_samples=cfg.n_epochs * cfg.rollout_size, **common, policy_loss=float(u[1]),
+                           value_loss=float(u[2]), entropy=float(u[3]), approx_kl=float(u[4]) * 0.01,
+                           clip_fraction=float(u[5]), explained_variance=float(u[6]), n_epochs_done=cfg.n_epochs,
+                           ratio_max=1.0 + float(u[7]), kl_beta=cfg.kl_beta_init, kl_after_update=float(u[4]) * 0.01)
 
     def state_dict(self) -> dict[str, Any]:
         return {"rng": self.rng.bit_generator.state, "params": self.params.clone(), "n_fake_updates": self.n_fake_updates}

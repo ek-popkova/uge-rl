@@ -135,6 +135,7 @@ the SB3 calibration (next section); no shared item is open any more. Everything 
 | tuning budget | at most 4 configurations per algorithm (the defaults + up to 3 variations), only algorithm-specific hyperparameters varied (never the shared values above, the budget or the validation settings); one run per configuration with the pilot run seed `PILOT_RUN_SEED = 99`, reward `balanced`, density `medium`, validation on `VAL_SEEDS` only | equal for both algorithms, so the comparison is not "who tuned more"; seed 99 is disjoint from every seed set and its derived vector-env seeds collide with none (tested) |
 | selection criterion | mean `return_balanced` over the last 3 validation points; ties (within 1e-9) broken by the lower `crash_rate` over the same points, then the first listed (the defaults); `common.aggregate.select_tuning_config` | fixed before any tuning; a mean over 3 points damps the noise of a single 20-episode validation |
 | tuning runs | variant `tune-<name>` (`runs/<algo>/balanced/tune-<name>/seed99/`); `load_eval_episodes` and `per_model_table` exclude them by default; the harness refuses a `tune-*` run with another seed / reward / density, a shared key or a budget override, and refuses seed 99 outside `tune-*` | they never mix with the main grid or the sensitivity runs. Log: `docs/tuning_log.md` |
+| supplementary runs | pre-declared registry `SUPPLEMENTARY_RUNS` (`common/train_config.py`), variant `supp-<name>` (`runs/<algo>/<reward>/supp-<name>/seed<s>/`), frozen budget, training density, seeds of `TRAIN_SEEDS`; supplementary reward presets in `common.config.SUPPLEMENTARY_REWARDS`, usable by registered `supp-` runs only; `check_run_roles` refuses every unregistered variant (debug runs, whose total steps / validation settings differ from the frozen budget, excepted); excluded from every DDQN vs PPO table (`include_supplementary=False`) | declared before training like the sensitivity grid, so no extra run can be added after seeing results without showing up as a registry change; a variant name always tells the role. Entries: "Supplementary runs" below |
 | sensitivity framework | reward `balanced`, density `medium`, the same `total_env_steps` as the main grid, `SENSITIVITY_SEEDS = [0, 1, 2]`, one parameter varied at a time, the others at their frozen base values | one-at-a-time around frozen values is the cheapest design that shows which hyperparameter matters |
 | sensitivity grid (`SENSITIVITY_GRID`), **relative to the base value** | learning rate: base x1/3, x1, x3 (both algorithms); DDQN `eps_decay_fraction`: base -0.2, base, base +0.2; PPO `clip_range`: base -0.1, base, base +0.1. `gamma` is not varied (>= 0.99 is required, little effect on 30-step episodes) | the base is in the grid by construction, so the grid follows whatever base the owner chooses and whatever `total_env_steps` the team decides. A value outside its valid range (`eps_decay_fraction` in (0, 1], `clip_range` in (0, 1)) raises instead of being clipped: the `eps_decay_fraction` base must lie in (0.2, 0.8], the `clip_range` base in (0.1, 0.9). 4 non-base settings x 3 seeds = 12 runs per algorithm, 24 in total (`expand_sensitivity_grid`) |
 | DDQN epsilon decay | `eps_decay_fraction` (placeholder base 0.3) of `total_env_steps`, linear from `eps_start` to `eps_end` | a fraction instead of absolute steps, so the schedule and its sensitivity grid follow the budget. Resolved to `eps_decay_steps = round(fraction x total_env_steps)` at run start (`DDQNConfig.eps_decay_steps`) and stored in `run_meta.json` under `resolved` (PPO: `rollout_size`) |
@@ -161,6 +162,26 @@ setting runs with seeds 0, 1, 2 (reward `balanced`, density `medium`), 3 runs pe
 | PPO | `clip_range` | base -0.1 | 0.1 | `clip_range=0.1` | 3 |
 | PPO | `clip_range` | base +0.1 | 0.3 | `clip_range=0.3` | 3 |
 | | | | | **total** | **24** |
+
+### Supplementary runs (registry, decided 2026-11-27)
+
+Outside the DDQN vs PPO comparison; reported separately. `common.train_config.SUPPLEMENTARY_RUNS` is the source; adding an entry is
+one line there (validated at import: algorithm-specific keys only, a valid config whose rollout fits the budget, values different from
+the base, rewards of `REWARDS` / `SUPPLEMENTARY_REWARDS`, seeds of `TRAIN_SEEDS`, not a sensitivity point). `FromBase("rollout_size")`
+takes the value from the base config, so the entry follows the PPO defaults chosen after tuning. Base point: the main-grid run with the
+same algorithm, reward and seed.
+
+| Variant | Algorithm | Overrides | Rewards | Seeds | Runs | Purpose |
+|---|---|---|---|---|---:|---|
+| `supp-ppo-kl` | PPO | `policy_loss = "kl"` (`kl_target`, `kl_beta_init` as decided below) | `balanced` | 0, 1, 2 | 3 | PPO-KL vs PPO-Clip (report section 3.3) |
+| `supp-a2c` | PPO | `n_epochs = 1`, `minibatch_size = n_envs * n_steps` (`FromBase`) | `balanced` | 0, 1, 2 | 3 | A2C-like: one full-batch gradient step per rollout at ratio 1 |
+| (after tuning) `supp-ent-<value>` | PPO | `ent_coef = <value>` | all 4 `REWARDS` | 0-4 | 20 | stronger exploration; added once its `ent_coef` is known |
+| | | | | | **6 (+20)** | |
+
+Supplementary reward presets (`common.config.SUPPLEMENTARY_REWARDS`, experiment (b)): no entry yet; the weights are fixed analytically
+before the runs (`indifference_point`; the ordering G_crash < G_slow < G_succ must hold, checked at import). A run with one needs a
+registry entry that lists the preset; its base run is the `balanced` main run (reward weights excepted). DDQN: the registry works for it,
+no entry. Cost: 6 runs x 315,000 = 1.9 M simulated steps, about 3.7 h on the PPO machine at 143 steps/s.
 
 ## Values frozen after the calibration
 
@@ -192,7 +213,19 @@ valid budget values and the nearest valid rollout sizes; it is called by `check_
 and at the start of `TrainingRun.run`. Since 300,000 = 25 x 12,000, the rule is: **`n_envs * n_steps` must be a divisor of 12,000**, e.g. 1,000,
 2,000, 3,000, 4,000, 6,000 or 12,000 (the SB3 calibration used 2,048, which would be refused). DDQN advances one transition at a time and
 has no such constraint. Debug and test budgets (explicit `--total-steps` ... overrides, never used for results) only need a `total_env_steps` that
-fits; they may validate at the next rollout boundary.
+fits; they may validate at the next rollout boundary. `minibatch_size` must in turn divide `n_envs * n_steps` (`PPOConfig` raises), so
+every minibatch has the same size.
+
+### PPO-KL settings (PPO only, decided, not tuned)
+
+Algorithm-specific values of `PPOConfig` that are decided rather than placeholders (owner: PPO; `common/train_config.py`). They are not
+tuned and are not part of the sensitivity grid.
+
+| Setting | Value | Justification |
+|---|---|---|
+| `policy_loss` | `"clip"` (PPO-Clip, report `eq:ppo-clip`) for the main grid, tuning and sensitivity runs; `"kl"` (adaptive KL penalty) only for the supplementary run `supp-ppo-kl` | PPO-Clip is the variant the assignment and the literature treat as standard PPO; PPO-KL is the alternative trust-region mechanism of the same paper, run as a separate variant (report section 3.3) |
+| `kl_target` (d_targ) | 0.01 | the middle value of the three tried in the PPO paper (Schulman et al. 2017, Table 1: 0.003, 0.01, 0.03; adaptive KL scored 0.68, 0.74, 0.71) |
+| `kl_beta_init` | 1.0 | the PPO paper's initial value ("beta was initialized at 1", Table 1 caption); the paper notes the initial value "is not important in practice because the algorithm quickly adjusts it" (section 4) |
 
 ### Post-hoc plateau metric
 

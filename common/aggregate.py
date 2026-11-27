@@ -2,7 +2,8 @@
 
 Level 1, per model: one model = (algorithm, train reward, variant, training seed); its metrics under
 one condition are the mean over its test episodes (100 on ``TEST_SEEDS``). ``per_model_table``.
-``variant`` is "main" for the main grid and the sensitivity-run name otherwise (``common.paths``).
+``variant`` is "main" for the main grid and the sensitivity-run name, ``tune-<name>`` or ``supp-<name>`` otherwise
+(``common.paths``); every table carries its ``role`` (``common.paths.variant_role``: main, sensitivity, tuning, supplementary).
 
 Level 2, per (algorithm, train reward, variant, condition): mean over the training seeds with a two-sided
 95% Student-t confidence interval over seeds, mean +/- t(0.975, n-1) * sd / sqrt(n) with n the
@@ -19,8 +20,11 @@ metrics (crash rate, completion rate, mean speed, lane changes, near-miss rate, 
 The level-1 column ``return_own`` is the return under the preset the model was trained with.
 
 Tuning runs (variant ``tune-<name>``) never enter these tables (``per_model_table`` drops them by default); the tuning
-selection is ``select_tuning_config``. Sensitivity runs take their base point from the main grid
-(``check_sensitivity_runs`` fails if the non-varied parameters differ).
+selection is ``select_tuning_config``. Supplementary runs (variant ``supp-<name>``, ``common.train_config.SUPPLEMENTARY_RUNS``,
+and every run trained with a ``SUPPLEMENTARY_REWARDS`` preset) are not part of the DDQN vs PPO comparison: ``per_model_table``
+drops them unless ``include_supplementary`` and they are reported in tables of their own (``check_supplementary_runs`` first).
+Sensitivity runs take their base point from the main grid (``check_sensitivity_runs`` fails if the non-varied parameters
+differ).
 
 Training curves (``val_log.csv``, one file per run): ``steps_to_threshold`` (env steps and training
 wall time until each pre-registered level of ``TARGET_PERFORMANCE`` holds at ``TARGET_CONSECUTIVE`` validation points in a row), ``learning_curve_table``
@@ -43,18 +47,29 @@ import pandas as pd
 
 from common.config import (
     SENSITIVITY_REWARD,
+    is_supplementary_reward,
     TARGET_CONSECUTIVE,
     TARGET_PERFORMANCE,
     TUNING_CRITERION_COLUMN,
     TUNING_CRITERION_LAST_POINTS,
     TUNING_MAX_CONFIGS,
 )
-from common.metrics import add_return_columns, summarize_metrics
-from common.paths import ALGORITHMS, MAIN_VARIANT, RESULTS_DIR, is_tuning_variant, run_meta_path
-from common.train_config import check_sensitivity_run
+from common.metrics import add_return_columns, recompute_return, summarize_metrics
+from common.paths import (
+    ALGORITHMS,
+    MAIN_VARIANT,
+    RESULTS_DIR,
+    SUPPLEMENTARY_PREFIX,
+    is_supplementary_variant,
+    is_tuning_variant,
+    run_meta_path,
+    variant_role,
+)
+from common.train_config import check_sensitivity_run, check_supplementary_run, supplementary_base_reward
 
-MODEL_KEYS = ["algorithm", "train_reward", "variant", "train_seed", "condition"]
-GROUP_KEYS = ["algorithm", "train_reward", "variant", "condition"]
+# ``role`` is derived from ``variant`` (common.paths.variant_role), so it never splits a group; it labels every row.
+MODEL_KEYS = ["algorithm", "train_reward", "variant", "role", "train_seed", "condition"]
+GROUP_KEYS = ["algorithm", "train_reward", "variant", "role", "condition"]
 
 # Two-sided 95% Student-t quantiles t(0.975, df) for df = 1..30 (checked against the t distribution).
 _T_975 = (
@@ -66,19 +81,31 @@ _T_975 = (
 _Z_975 = 1.959963984540054
 
 
-def per_model_table(episodes: pd.DataFrame, include_tuning: bool = False) -> pd.DataFrame:
-    """Level 1: one row per (algorithm, train_reward, train_seed, condition).
+def per_model_table(
+    episodes: pd.DataFrame, include_tuning: bool = False, include_supplementary: bool = False
+) -> pd.DataFrame:
+    """Level 1: one row per (algorithm, train_reward, variant, train_seed, condition), labelled with its ``role``.
 
     Rows of tuning runs (variant ``tune-<name>``) are dropped unless ``include_tuning``: they never enter a result table.
+    Rows of supplementary runs (variant ``supp-<name>`` or a ``SUPPLEMENTARY_REWARDS`` training reward) are dropped unless
+    ``include_supplementary``: they never enter a DDQN vs PPO table.
 
     ``episodes`` is the concatenation of the per-episode CSVs with the columns ``algorithm``,
     ``train_reward``, ``variant``, ``train_seed`` and ``condition`` added
-    (``common.paths.load_eval_episodes``); a missing ``variant`` column is read as "main".
+    (``common.paths.load_eval_episodes``); a missing ``variant`` column is read as "main", ``role`` is derived from it.
+    ``return_own`` is the return under the training reward (recomputed from the components for a supplementary reward,
+    which has no ``return_<preset>`` column).
     """
     if "variant" not in episodes:
         episodes = episodes.assign(variant=MAIN_VARIANT)
     if not include_tuning:
         episodes = episodes[~episodes["variant"].map(is_tuning_variant)]
+    if not include_supplementary:
+        supp = episodes["variant"].map(is_supplementary_variant).astype(bool)
+        if "train_reward" in episodes:
+            supp |= episodes["train_reward"].map(is_supplementary_reward).astype(bool)
+        episodes = episodes[~supp]
+    episodes = episodes.assign(role=episodes["variant"].map(variant_role))
     missing = [c for c in MODEL_KEYS if c not in episodes]
     if missing:
         raise ValueError(f"episodes lack the columns {missing}")
@@ -87,7 +114,8 @@ def per_model_table(episodes: pd.DataFrame, include_tuning: bool = False) -> pd.
     for key, df in episodes.groupby(MODEL_KEYS, sort=True):
         row = dict(zip(MODEL_KEYS, key))
         row.update(summarize_metrics(df))
-        row["return_own"] = float(df[f"return_{row['train_reward']}"].mean())
+        own = f"return_{row['train_reward']}"
+        row["return_own"] = float((df[own] if own in df else recompute_return(df, row["train_reward"])).mean())
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -157,9 +185,10 @@ def across_seeds_table(per_model: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def aggregate(episodes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Both levels at once: ``(per_model, across_seeds)``; ``per_model`` holds the per-seed values."""
-    per_model = per_model_table(episodes)
+def aggregate(episodes: pd.DataFrame, include_supplementary: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Both levels at once: ``(per_model, across_seeds)``; ``per_model`` holds the per-seed values. Tuning runs are always
+    dropped, supplementary runs unless ``include_supplementary`` (for their own tables, never next to the main grid)."""
+    per_model = per_model_table(episodes, include_supplementary=include_supplementary)
     return per_model, across_seeds_table(per_model)
 
 
@@ -268,7 +297,8 @@ def steps_to_plateau(
     * ``censored`` is True if the plateau point lies inside the last 20% of the validation points (the run may not have
       converged within its budget) and in every NaN case. Report censored runs as such; do not drop them silently.
 
-    ``metric="return_own"`` uses the return under the run's own training reward (``reward``, column ``return_<reward>``);
+    ``metric="return_own"`` uses the return under the run's own training reward (``reward``, column ``return_<reward>``;
+    ``episode_return`` for a ``SUPPLEMENTARY_REWARDS`` preset, which has no column: validation runs with the training reward);
     any other value is a column name of ``val_log``. Returns ``env_step``, ``train_wall_s`` (without validation time) and
     ``val_idx`` of the plateau point, ``censored``, ``final_level`` and ``improvement``.
     """
@@ -277,7 +307,7 @@ def steps_to_plateau(
     if metric == "return_own":
         if reward is None:
             raise ValueError("metric 'return_own' needs reward= (the preset the run was trained with)")
-        column = f"return_{reward}"
+        column = "episode_return" if is_supplementary_reward(reward) else f"return_{reward}"
     else:
         column = metric
     if column not in val_log:
@@ -411,12 +441,20 @@ def auc_across_seeds(
 # comparable with each other: they are within-algorithm information only (the DDQN vs PPO cost comparison uses the ``steps_to_*``
 # rows, which carry ``machine = "all"``).
 COST_KEYS = ["algorithm", "train_reward", "variant", "train_seed"]
-COST_GROUP_KEYS = ["algorithm", "train_reward", "variant"]
+COST_GROUP_KEYS = ["algorithm", "train_reward", "variant", "role"]  # role is derived from variant: a label, never a split
 ALL_MACHINES = "all"  # machine label of the hardware-independent rows of ``cost_across_seeds``
 
 
 def hardware_independent_columns(levels: Sequence[str]) -> list[str]:
-    return [f"steps_to_{level}" for level in levels] + ["steps_to_plateau"]
+    return ([f"steps_to_{level}" for level in levels]
+            + ["steps_to_plateau", "gradient_updates_per_env_step", "samples_per_env_step"])
+
+
+def _per_env_step(count: Any, final_step: float) -> float:
+    """``count / final_step``; NaN if the count was not recorded (None) or the step count is unknown."""
+    if count is None or not final_step or math.isnan(final_step):
+        return math.nan
+    return float(count) / final_step
 
 
 def wall_time_columns(levels: Sequence[str]) -> list[str]:
@@ -434,14 +472,17 @@ def cost_per_model(runs: Mapping[tuple, tuple[pd.DataFrame, Mapping[str, Any]]])
     """Level 1 of the cost comparison: one row per model.
 
     ``runs`` maps ``(algorithm, train_reward, variant, train_seed)`` to ``(val_log, run_meta)`` (``load_cost_inputs``).
-    Columns: the keys, ``machine``; the hardware-independent ``steps_to_<level>`` for every level of ``TARGET_PERFORMANCE``
-    and ``steps_to_plateau`` (+ ``plateau_censored``, ``plateau_final_level``); the machine-dependent ``wall_s_to_<level>``,
+    Columns: the keys, ``role``, ``machine``; the hardware-independent ``steps_to_<level>`` for every level of ``TARGET_PERFORMANCE``
+    and ``steps_to_plateau`` (+ ``plateau_censored``, ``plateau_final_level``), ``gradient_updates_per_env_step``
+    (``timing.n_updates`` / ``final_env_step``) and ``samples_per_env_step`` (``timing.n_gradient_samples`` /
+    ``final_env_step``, NaN if the run did not record it); the machine-dependent ``wall_s_to_<level>``,
     ``wall_s_to_plateau``, ``train_steps_per_s``, ``train_wall_s_total`` (training wall time without validation, last
     validation point), ``update_time_s_per_env_step`` and ``inference_median_ms``.
     """
     rows = []
     for key, (val_log, meta) in sorted(runs.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
         row = dict(zip(COST_KEYS, key))
+        row["role"] = variant_role(row["variant"])
         row["machine"] = machine_of(meta)
         reached = steps_to_threshold(val_log)
         for level, r in reached.items():
@@ -454,6 +495,10 @@ def cost_per_model(runs: Mapping[tuple, tuple[pd.DataFrame, Mapping[str, Any]]])
         row["train_steps_per_s"] = float(timing.get("train_steps_per_s") or math.nan)
         row["train_wall_s_total"] = float(val_log["train_wall_s"].iloc[-1]) if "train_wall_s" in val_log and len(val_log) else math.nan
         row["update_time_s_per_env_step"] = float(timing.get("update_time_s") or math.nan) / final_step
+        # Hardware independent, same definition for every algorithm: optimizer steps and per-sample gradient
+        # evaluations (sum of minibatch sizes) per env step, from the harness counters in run_meta.json.
+        row["gradient_updates_per_env_step"] = _per_env_step(timing.get("n_updates"), final_step)
+        row["samples_per_env_step"] = _per_env_step(timing.get("n_gradient_samples"), final_step)
         row["inference_median_ms"] = float((meta.get("inference") or {}).get("median_ms", math.nan))
         rows.append(row)
     return pd.DataFrame(rows)
@@ -481,7 +526,8 @@ def cost_across_seeds(per_model: pd.DataFrame, levels: Optional[Sequence[str]] =
     over all runs of (algorithm, train_reward, variant) with ``machine = "all"``; wall-time metrics once PER MACHINE, never
     pooled across machines (a group with a single run has no interval). Runs are split by algorithm, so every wall-time row
     belongs to one algorithm on one machine and is not comparable with the other algorithm's rows; only the ``machine = "all"``
-    rows (env steps to the targets and to the plateau) are compared between DDQN and PPO.
+    rows (env steps to the targets and to the plateau, gradient updates and samples per env step) are compared between
+    DDQN and PPO.
     """
     levels = list(TARGET_PERFORMANCE) if levels is None else list(levels)
     rows = []
@@ -497,7 +543,8 @@ def cost_across_seeds(per_model: pd.DataFrame, levels: Optional[Sequence[str]] =
 
 def load_cost_inputs(root: Path = RESULTS_DIR, variant: str = MAIN_VARIANT) -> dict[tuple, tuple[pd.DataFrame, dict]]:
     """``{(algorithm, train_reward, variant, train_seed): (val_log, run_meta)}`` of every FINISHED run of ``variant``
-    under ``<root>/runs`` (input of ``cost_per_model``). Unfinished and failed runs are skipped."""
+    under ``<root>/runs`` (input of ``cost_per_model``). Unfinished and failed runs are skipped. A DDQN vs PPO cost table uses
+    ``variant="main"``; a supplementary variant is loaded on its own for its own table."""
     from common.run_meta import read_meta
 
     out: dict[tuple, tuple[pd.DataFrame, dict]] = {}
@@ -578,14 +625,37 @@ def check_sensitivity_runs(root: Path = RESULTS_DIR) -> list[Path]:
     """Check every sensitivity run under ``<root>/runs`` against its main-grid base run; returns the checked meta files.
 
     Call before building a sensitivity table. Raises ``ValueError`` (first failing run) or ``FileNotFoundError`` if the
-    main run that provides the base point is missing. Tuning runs and the main variant are not sensitivity runs.
+    main run that provides the base point is missing. Only variants with the role "sensitivity" are checked (not main,
+    tuning or supplementary runs).
     """
     checked = []
     for algo in ALGORITHMS:
         for path in sorted((Path(root) / "runs" / algo / SENSITIVITY_REWARD).glob("*/seed*/run_meta.json")):
             variant = path.parent.parent.name
-            if variant == MAIN_VARIANT or is_tuning_variant(variant):
+            if variant_role(variant) != "sensitivity":
                 continue
             check_sensitivity_base(algo, int(path.parent.name.removeprefix("seed")), variant, root)
+            checked.append(path)
+    return checked
+
+
+# ---------------------------------------------------------------------------------------------
+# Supplementary runs: the base point comes from the main grid
+# ---------------------------------------------------------------------------------------------
+def check_supplementary_runs(root: Path = RESULTS_DIR) -> list[Path]:
+    """Check every supplementary run (``supp-<name>``, any reward) under ``<root>/runs`` against its main-grid base run
+    (``common.train_config.check_supplementary_run``); returns the checked meta files.
+
+    Call before building a supplementary table. Raises ``ValueError`` (first failing run, also an unregistered ``supp-``
+    name) or ``FileNotFoundError`` if the main run that provides the base point is missing.
+    """
+    from common.run_meta import read_meta
+
+    checked = []
+    for algo in ALGORITHMS:
+        for path in sorted((Path(root) / "runs" / algo).glob(f"*/{SUPPLEMENTARY_PREFIX}*/seed*/run_meta.json")):
+            reward, seed = path.parent.parent.parent.name, int(path.parent.name.removeprefix("seed"))
+            main = run_meta_path(algo, supplementary_base_reward(reward), seed, root, MAIN_VARIANT)
+            check_supplementary_run(read_meta(path), read_meta(main))
             checked.append(path)
     return checked

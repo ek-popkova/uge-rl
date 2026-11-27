@@ -15,7 +15,10 @@ Hyperparameter sensitivity runs override single fields with ``--set key=value`` 
 turns them into the directory level ``runs/<algo>/<reward>/<variant>/seed<s>``. The sensitivity grid is data
 (``SENSITIVITY_GRID``, relative to the base values) and ``expand_sensitivity_grid`` lists its 24 runs; ``check_sensitivity_run`` verifies that a
 sensitivity run differs from the main-grid run only in its varied parameter. Tuning runs (variant ``tune-<name>``,
-run seed ``PILOT_RUN_SEED``) are checked by ``check_run_roles``.
+run seed ``PILOT_RUN_SEED``) are checked by ``check_run_roles``. Supplementary runs (variant ``supp-<name>``) are pre-declared in
+the registry ``SUPPLEMENTARY_RUNS`` (validated at import); ``expand_supplementary_runs`` lists them, ``check_run_roles`` refuses
+a run that does not match its entry and every other unregistered variant, and ``check_supplementary_run`` compares a finished
+run with its main-grid base run.
 """
 
 from __future__ import annotations
@@ -34,15 +37,28 @@ from common.config import (
     SENSITIVITY_DENSITY,
     SENSITIVITY_REWARD,
     SENSITIVITY_SEEDS,
+    TRAIN_DENSITY,
+    TRAIN_SEEDS,
     TUNING_DENSITY,
     TUNING_REWARD,
     VAL_SEEDS,
+    all_reward_names,
+    is_supplementary_reward,
 )
-from common.paths import ALGORITHMS, MAIN_VARIANT, check_variant, is_tuning_variant
+from common.paths import (
+    ALGORITHMS,
+    MAIN_VARIANT,
+    SUPPLEMENTARY_PREFIX,
+    check_variant,
+    is_supplementary_variant,
+    is_tuning_variant,
+    supplementary_variant,
+)
 
 SUPPORTED_ACTIVATIONS = ("relu", "tanh")  # common.networks builds exactly these
 # Decided for BOTH algorithms; never varied by tuning or sensitivity runs and equal in the two configs.
 SHARED_KEYS = frozenset({"gamma", "hidden_sizes", "activation", "obs_flatten", "ppo_shared_trunk", "device"})
+POLICY_LOSSES = ("clip", "kl")  # PPOConfig.policy_loss: PPO-Clip or PPO-KL (report section 3.3)
 
 
 def _ph(value: Any) -> Any:
@@ -208,6 +224,13 @@ class PPOConfig(_ConfigBase):
     vf_coef: float = _ph(0.5)  # PLACEHOLDER: decide before training
     max_grad_norm: float = _ph(0.5)  # PLACEHOLDER: decide before training
     target_kl: Optional[float] = _ph(None)  # PLACEHOLDER: decide before training (None = no early stop)
+    # Policy loss (report section 3.3): "clip" = PPO-Clip (eq:ppo-clip), "kl" = PPO-KL (adaptive KL penalty). Decided.
+    policy_loss: str = "clip"
+    # PPO-KL only, decided (the PPO paper's values, not tuned): d_targ of the adaptive KL penalty (Schulman et al. 2017
+    # used 0.003 / 0.01 / 0.03) and the initial penalty coefficient beta (the paper starts at 1 and reports low
+    # sensitivity to it).
+    kl_target: float = 0.01
+    kl_beta_init: float = 1.0
     hidden_sizes: tuple[int, ...] = (256, 256)  # decided (shared): size of the actor AND of the critic
     activation: str = "relu"  # decided (shared)
     obs_flatten: bool = True  # decided (shared): 5x5 Kinematics flattened to 25 features, no extra normalization
@@ -221,6 +244,12 @@ class PPOConfig(_ConfigBase):
                 raise ValueError(f"PPOConfig.{name} must be positive, got {getattr(self, name)}")
         if self.minibatch_size > self.rollout_size:
             raise ValueError(f"minibatch_size {self.minibatch_size} exceeds the rollout size {self.rollout_size}")
+        if self.rollout_size % self.minibatch_size:
+            # A remainder would give a short last minibatch (a 1-sample minibatch has a normalized advantage of 0 and no
+            # policy gradient), so every minibatch has exactly minibatch_size samples.
+            raise ValueError(
+                f"minibatch_size {self.minibatch_size} must divide the rollout size n_envs * n_steps = {self.rollout_size}"
+            )
         if not 0.0 <= self.gae_lambda <= 1.0:
             raise ValueError(f"gae_lambda must be in [0, 1], got {self.gae_lambda}")
         if not 0.0 < self.clip_range < 1.0:
@@ -229,6 +258,10 @@ class PPOConfig(_ConfigBase):
             raise ValueError("ent_coef and vf_coef must be >= 0")
         if self.target_kl is not None and self.target_kl <= 0:
             raise ValueError("target_kl must be positive or None")
+        if self.policy_loss not in POLICY_LOSSES:
+            raise ValueError(f"policy_loss must be one of {POLICY_LOSSES}, got {self.policy_loss!r}")
+        if self.kl_target <= 0 or self.kl_beta_init <= 0:
+            raise ValueError(f"kl_target and kl_beta_init must be positive, got {self.kl_target}, {self.kl_beta_init}")
 
     @property
     def rollout_size(self) -> int:
@@ -413,23 +446,76 @@ def variant_name(overrides: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------------------------
 # Tuning and sensitivity protocol (shared decisions, docs/config_decisions.md)
 # ---------------------------------------------------------------------------------------------
-def check_run_roles(
-    variant: str, seed: int, reward: str, density: str, overridden: Sequence[str], budget_overrides: Sequence[str]
-) -> None:
-    """Keep tuning runs apart from every result run; raises ``ValueError`` on a violation.
+# Budget fields whose change makes a run a debug run (never a result); the checkpoint interval does not affect results.
+DEBUG_BUDGET_KEYS = frozenset({"total_env_steps", "val_every_env_steps", "val_n_episodes"})
 
-    A ``tune-<name>`` variant must use the run seed ``PILOT_RUN_SEED``, the reward ``TUNING_REWARD`` and the density
-    ``TUNING_DENSITY``, may override algorithm-specific hyperparameters only (never ``SHARED_KEYS``) and must use the
-    default budget and validation settings (no budget overrides). Conversely ``PILOT_RUN_SEED`` is reserved for tuning.
+
+def effective_budget_overrides(budget_kw: Mapping[str, Any]) -> dict[str, Any]:
+    """The budget overrides whose value differs from the frozen ``TrainBudget`` default (equal values are dropped)."""
+    frozen = TrainBudget()
+    return {k: v for k, v in budget_kw.items() if v != getattr(frozen, k)}
+
+
+def check_run_roles(
+    variant: str,
+    seed: int,
+    reward: str,
+    density: str,
+    overrides: Mapping[str, Any],
+    budget_overrides: Sequence[str],
+    *,
+    algo: str,
+) -> None:
+    """Every run has exactly one role; raises ``ValueError`` on a violation (called by ``resolve_setup`` before a run).
+
+    The roles (``common.paths.variant_role``):
+
+    * ``main``: no hyperparameter overrides.
+    * tuning, ``tune-<name>``: the run seed ``PILOT_RUN_SEED``, the reward ``TUNING_REWARD`` and the density
+      ``TUNING_DENSITY``, algorithm-specific hyperparameters only (never ``SHARED_KEYS``), the default budget and validation
+      settings (no budget overrides). Conversely ``PILOT_RUN_SEED`` is reserved for tuning.
+    * supplementary, ``supp-<name>``: ``name`` is a key of ``SUPPLEMENTARY_RUNS`` and the run matches its entry exactly
+      (``check_supplementary_role``).
+    * sensitivity, any other variant: the run must be one point of ``expand_sensitivity_grid()`` (same algorithm, the
+      overrides of that point and nothing else, its generated variant name, reward ``SENSITIVITY_REWARD``, density
+      ``SENSITIVITY_DENSITY``, a seed of ``SENSITIVITY_SEEDS``). An unregistered variant is refused, so a result run is always
+      main, a sensitivity point, ``tune-*`` or ``supp-*``.
+
+    A ``SUPPLEMENTARY_REWARDS`` preset is accepted in a registered supplementary run only. Debug runs, i.e. runs whose
+    budget really differs from the frozen ``TrainBudget`` in a result-relevant value (``DEBUG_BUDGET_KEYS``: total steps,
+    validation interval or validation episodes; tests and smoke runs, never results), are exempt from the sensitivity rule
+    (their budget already makes them unusable as results). ``budget_overrides`` must hold only the keys whose value differs
+    from the frozen budget (``effective_budget_overrides``, applied by ``resolve_setup``): ``--total-steps 300000`` is not an
+    override, and a different checkpoint interval alone (no effect on results) does not make a debug run. Tuning and
+    supplementary runs never take budget overrides.
     """
+    overrides = dict(overrides)
     if seed == CALIBRATION_ONLY_SEED:  # reserved for the SB3 calibration runs (scripts/calibration/), never a result seed
         raise ValueError(f"run seed {CALIBRATION_ONLY_SEED} (CALIBRATION_ONLY_SEED) is reserved for the SB3 calibration runs")
-    if not is_tuning_variant(variant):
-        if seed == PILOT_RUN_SEED:
-            raise ValueError(
-                f"run seed {PILOT_RUN_SEED} (PILOT_RUN_SEED) is reserved for tuning runs: use a 'tune-<name>' variant"
-            )
+    if is_tuning_variant(variant):
+        _check_tuning_role(variant, seed, reward, density, overrides, budget_overrides)
         return
+    if seed == PILOT_RUN_SEED:
+        raise ValueError(f"run seed {PILOT_RUN_SEED} (PILOT_RUN_SEED) is reserved for tuning runs: use a 'tune-<name>' variant")
+    if is_supplementary_variant(variant):
+        check_supplementary_role(variant, algo, seed, reward, density, overrides, budget_overrides)
+        return
+    if is_supplementary_reward(reward):
+        raise ValueError(
+            f"reward {reward!r} is a SUPPLEMENTARY_REWARDS preset: only a registered supplementary run ('supp-<name>', "
+            f"SUPPLEMENTARY_RUNS) may train with it, never a main, tuning or sensitivity run"
+        )
+    if variant == MAIN_VARIANT:
+        if overrides:
+            raise ValueError(f"the main variant takes no hyperparameter overrides, got {sorted(overrides)}")
+        return
+    if set(budget_overrides) & DEBUG_BUDGET_KEYS:
+        return  # debug run (see the docstring)
+    _check_sensitivity_role(variant, algo, seed, reward, density, overrides)
+
+
+def _check_tuning_role(variant: str, seed: int, reward: str, density: str, overrides: Mapping[str, Any],
+                       budget_overrides: Sequence[str]) -> None:
     problems = []
     if seed != PILOT_RUN_SEED:
         problems.append(f"tuning runs use the run seed {PILOT_RUN_SEED}, got {seed}")
@@ -437,13 +523,35 @@ def check_run_roles(
         problems.append(f"tuning runs use the reward {TUNING_REWARD!r}, got {reward!r}")
     if density != TUNING_DENSITY:
         problems.append(f"tuning runs use the density {TUNING_DENSITY!r}, got {density!r}")
-    shared = sorted(set(overridden) & SHARED_KEYS)
+    shared = sorted(set(overrides) & SHARED_KEYS)
     if shared:
         problems.append(f"tuning may not vary the shared decisions {shared}")
     if budget_overrides:
         problems.append(f"tuning may not change the budget or validation settings {sorted(budget_overrides)}")
     if problems:
         raise ValueError(f"invalid tuning run {variant!r}: " + "; ".join(problems))
+
+
+def _check_sensitivity_role(variant: str, algo: str, seed: int, reward: str, density: str,
+                            overrides: Mapping[str, Any]) -> None:
+    points = {r.variant: r for r in expand_sensitivity_grid(seeds=SENSITIVITY_SEEDS[:1]) if r.algo == algo}
+    point = points.get(variant)
+    if point is None or dict(point.overrides) != dict(overrides):
+        raise ValueError(
+            f"variant {variant!r} with overrides {dict(overrides)} is not a registered run: a result run is 'main' (no "
+            f"overrides), a sensitivity point of expand_sensitivity_grid() ({algo}: {sorted(points)}, variant name generated "
+            f"from --set), a tuning run 'tune-<name>' or a supplementary run 'supp-<name>' of SUPPLEMENTARY_RUNS "
+            f"({sorted(SUPPLEMENTARY_RUNS)}); debug runs need budget overrides (--total-steps ...)"
+        )
+    problems = []
+    if reward != SENSITIVITY_REWARD:
+        problems.append(f"reward {SENSITIVITY_REWARD!r}, got {reward!r}")
+    if density != SENSITIVITY_DENSITY:
+        problems.append(f"density {SENSITIVITY_DENSITY!r}, got {density!r}")
+    if seed not in SENSITIVITY_SEEDS:
+        problems.append(f"a seed of {SENSITIVITY_SEEDS}, got {seed}")
+    if problems:
+        raise ValueError(f"sensitivity run {variant!r} must use " + "; ".join(problems))
 
 
 # Sensitivity grid, fixed before training: one parameter varied at a time, every grid RELATIVE to the base value, so the
@@ -572,3 +680,231 @@ def check_sensitivity_run(sens_meta: Mapping[str, Any], main_meta: Mapping[str, 
             f"sensitivity run {s_id['variant']!r} (seed {s_id['seed']}) does not match its main-grid base run:\n  - "
             + "\n  - ".join(problems)
         )
+
+
+# ---------------------------------------------------------------------------------------------
+# Supplementary runs: pre-declared, outside the DDQN vs PPO comparison
+# ---------------------------------------------------------------------------------------------
+# Experiments beyond the main grid (PPO-KL, an A2C-like PPO, later a stronger exploration, or a supplementary reward preset of
+# common.config.SUPPLEMENTARY_REWARDS) are declared HERE, before they are trained, like SENSITIVITY_GRID. A run uses the variant
+# "supp-<name>" (``--variant supp-<name>``, never generated from --set) and must match its entry exactly (check_run_roles):
+# the algorithm, the overrides (exact values, nothing else), one of the rewards and seeds, the training density and the frozen
+# budget. They never enter a DDQN vs PPO table (common.paths.load_eval_episodes, common.aggregate) and are reported separately.
+# Their base point is the main-grid run with the same algorithm, reward and seed (SUPPLEMENTARY_BASE_REWARD for a supplementary
+# reward, which has no main run), compared by check_supplementary_run. Adding an entry is one line in SUPPLEMENTARY_RUNS.
+SUPPLEMENTARY_BASE_REWARD = SENSITIVITY_REWARD  # reference main run of a run trained with a SUPPLEMENTARY_REWARDS preset
+
+
+@dataclass(frozen=True)
+class FromBase:
+    """An override value taken from the base config: ``FromBase("rollout_size")`` = the base config's ``rollout_size``.
+
+    Keeps an entry valid when the owner changes the defaults after tuning (e.g. ``n_envs`` / ``n_steps``).
+    """
+
+    attr: str
+
+
+@dataclass(frozen=True)
+class SupplementarySpec:
+    """One entry of ``SUPPLEMENTARY_RUNS``."""
+
+    algo: str  # "ddqn" | "ppo"
+    overrides: Mapping[str, Any]  # exact values or FromBase(...); algorithm-specific keys only; {} only for supplementary rewards
+    rewards: tuple[str, ...]  # presets of REWARDS and / or SUPPLEMENTARY_REWARDS
+    seeds: tuple[int, ...]  # a subset of TRAIN_SEEDS (the main-grid base run exists for the same seed)
+    purpose: str  # one line for tables and docs
+
+    def resolved_overrides(self, base: Optional[Any] = None) -> dict[str, Any]:
+        """The overrides with every ``FromBase`` resolved against ``base`` (default: the default config of the algorithm)."""
+        base = CONFIG_CLASSES[self.algo]() if base is None else base
+        return {k: (getattr(base, v.attr) if isinstance(v, FromBase) else v) for k, v in sorted(self.overrides.items())}
+
+
+# Decided by the team (2026-11-27). PPO only for now; the registry is algorithm-neutral (a DDQN entry has algo "ddqn").
+# To add an entry, add one line. The stronger-exploration entry is added after tuning, once its ent_coef is known
+# (all 4 REWARDS x seeds 0-4), e.g.
+#   "ent-<value>": SupplementarySpec("ppo", {"ent_coef": <value>}, tuple(REWARDS), (0, 1, 2, 3, 4), "stronger exploration"),
+SUPPLEMENTARY_RUNS: dict[str, SupplementarySpec] = {
+    "ppo-kl": SupplementarySpec("ppo", {"policy_loss": "kl"}, ("balanced",), (0, 1, 2), "PPO-KL (adaptive KL penalty) vs PPO-Clip"),
+    "a2c": SupplementarySpec("ppo", {"n_epochs": 1, "minibatch_size": FromBase("rollout_size")}, ("balanced",), (0, 1, 2),
+                             "A2C-like: one full-batch gradient step per rollout"),
+}
+
+
+def validate_supplementary_runs(registry: Mapping[str, SupplementarySpec]) -> None:
+    """Raise ``ValueError`` if an entry is not a valid, distinct supplementary run (``SUPPLEMENTARY_RUNS`` at import).
+
+    Per entry: a valid name (``supp-<name>`` is a variant), a known algorithm, override keys that are fields of its config
+    and not ``SHARED_KEYS``, values that give a valid config and differ from the base values, a rollout that fits the frozen
+    budget, rewards of ``REWARDS`` / ``SUPPLEMENTARY_REWARDS``, seeds of ``TRAIN_SEEDS``, a purpose. No overrides only if every
+    reward is supplementary (otherwise it is the main run). An entry that equals a sensitivity grid point on the sensitivity
+    reward and seeds is refused (that is a sensitivity run under another name).
+    """
+    for name, spec in registry.items():
+        where = f"SUPPLEMENTARY_RUNS[{name!r}]"
+        supplementary_variant(name)
+        if spec.algo not in CONFIG_CLASSES:
+            raise ValueError(f"{where}: unknown algorithm {spec.algo!r}; choose from {list(CONFIG_CLASSES)}")
+        cls = CONFIG_CLASSES[spec.algo]
+        base = cls()
+        names = {f.name for f in fields(cls)}
+        unknown = sorted(set(spec.overrides) - names)
+        if unknown:
+            raise ValueError(f"{where}: {cls.__name__} has no field(s) {unknown}")
+        shared = sorted(set(spec.overrides) & SHARED_KEYS)
+        if shared:
+            raise ValueError(f"{where}: supplementary runs may not vary the shared decisions {shared}")
+        for key, value in spec.overrides.items():
+            if isinstance(value, FromBase) and not hasattr(base, value.attr):
+                raise ValueError(f"{where}: FromBase({value.attr!r}) for {key!r}: {cls.__name__} has no attribute {value.attr!r}")
+        resolved = spec.resolved_overrides(base)
+        same = sorted(k for k, v in resolved.items() if getattr(base, k) == v)
+        if same:
+            raise ValueError(f"{where}: {same} equal the base values (no change)")
+        try:
+            cfg = apply_overrides(base, resolved)
+        except ValueError as exc:
+            raise ValueError(f"{where}: the overrides give an invalid config: {exc}") from None
+        if hasattr(cfg, "rollout_size"):
+            check_budget_matches_rollout(TrainBudget(), cfg.rollout_size, what=f"the rollout size of {where}")
+        if not spec.rewards or len(set(spec.rewards)) != len(spec.rewards):
+            raise ValueError(f"{where}: rewards must be non-empty and unique, got {spec.rewards}")
+        bad = [r for r in spec.rewards if r not in all_reward_names()]
+        if bad:
+            raise ValueError(f"{where}: unknown reward(s) {bad}; choose from {all_reward_names()}")
+        if not resolved and not all(is_supplementary_reward(r) for r in spec.rewards):
+            raise ValueError(f"{where}: no overrides on a REWARDS preset is the main run; declare overrides or a supplementary reward")
+        if not spec.seeds or len(set(spec.seeds)) != len(spec.seeds) or not set(spec.seeds) <= set(TRAIN_SEEDS):
+            raise ValueError(f"{where}: seeds must be non-empty, unique and in TRAIN_SEEDS {TRAIN_SEEDS}, got {spec.seeds}")
+        if not spec.purpose.strip():
+            raise ValueError(f"{where}: purpose must be given")
+        if SENSITIVITY_REWARD in spec.rewards and set(spec.seeds) & set(SENSITIVITY_SEEDS):
+            for run in expand_sensitivity_grid(seeds=SENSITIVITY_SEEDS[:1]):
+                if run.algo == spec.algo and dict(run.overrides) == resolved:
+                    raise ValueError(f"{where}: equals the sensitivity point {run.variant!r}; run it as a sensitivity run")
+
+
+@dataclass(frozen=True)
+class SupplementaryRun:
+    """One run of a ``SUPPLEMENTARY_RUNS`` entry (one reward, one seed); ``overrides`` are resolved."""
+
+    name: str
+    algo: str
+    variant: str
+    reward: str
+    seed: int
+    overrides: Mapping[str, Any]
+
+    def cli_args(self) -> list[str]:
+        """Arguments of ``python -m <algo>.train`` that start this run (budget at its default)."""
+        args = ["--variant", self.variant, "--reward", self.reward, "--density", TRAIN_DENSITY, "--seed", str(self.seed)]
+        for key, value in self.overrides.items():
+            args += ["--set", f"{key}={_format_value(value)}"]
+        return args
+
+
+def expand_supplementary_runs(
+    registry: Optional[Mapping[str, SupplementarySpec]] = None, configs: Optional[Mapping[str, Any]] = None
+) -> list[SupplementaryRun]:
+    """Every run of ``registry`` (default ``SUPPLEMENTARY_RUNS``): entry x reward x seed, overrides resolved against
+    ``configs[algo]`` (default: the default config). With the current registry: 2 entries x 1 reward x 3 seeds = 6 runs."""
+    registry = SUPPLEMENTARY_RUNS if registry is None else registry
+    runs = []
+    for name, spec in registry.items():
+        base = None if configs is None or spec.algo not in configs else configs[spec.algo]
+        overrides = spec.resolved_overrides(base)
+        for reward in spec.rewards:
+            for seed in spec.seeds:
+                runs.append(SupplementaryRun(name, spec.algo, supplementary_variant(name), reward, int(seed), overrides))
+    return runs
+
+
+def check_supplementary_role(
+    variant: str, algo: str, seed: int, reward: str, density: str, overrides: Mapping[str, Any],
+    budget_overrides: Sequence[str], registry: Optional[Mapping[str, SupplementarySpec]] = None,
+) -> None:
+    """A ``supp-<name>`` run must match its registry entry exactly; raises ``ValueError`` listing every mismatch."""
+    registry = SUPPLEMENTARY_RUNS if registry is None else registry
+    name = variant.removeprefix(SUPPLEMENTARY_PREFIX)
+    spec = registry.get(name)
+    if spec is None:
+        raise ValueError(
+            f"supplementary run {variant!r} is not registered: declare it in SUPPLEMENTARY_RUNS (registered: "
+            f"{[supplementary_variant(n) for n in registry]})"
+        )
+    problems = []
+    if algo != spec.algo:
+        problems.append(f"algorithm {spec.algo!r}, got {algo!r}")
+    elif dict(overrides) != spec.resolved_overrides():
+        problems.append(f"exactly the overrides {spec.resolved_overrides()}, got {dict(overrides)}")
+    if reward not in spec.rewards:
+        problems.append(f"a reward of {list(spec.rewards)}, got {reward!r}")
+    if seed not in spec.seeds:
+        problems.append(f"a seed of {list(spec.seeds)}, got {seed}")
+    if density != TRAIN_DENSITY:
+        problems.append(f"the training density {TRAIN_DENSITY!r}, got {density!r}")
+    if budget_overrides:
+        problems.append(f"the frozen budget (no budget overrides), got {sorted(budget_overrides)}")
+    if problems:
+        raise ValueError(f"supplementary run {variant!r} must use " + "; ".join(problems))
+
+
+def supplementary_base_reward(reward: str) -> str:
+    """Reward of the main-grid run a supplementary run is compared with: its own, or ``SUPPLEMENTARY_BASE_REWARD``."""
+    return SUPPLEMENTARY_BASE_REWARD if is_supplementary_reward(reward) else reward
+
+
+def check_supplementary_run(
+    supp_meta: Mapping[str, Any], main_meta: Mapping[str, Any], registry: Optional[Mapping[str, SupplementarySpec]] = None
+) -> None:
+    """Fail if a supplementary run differs from its main-grid base run in anything but its declared overrides (and reward).
+
+    Both arguments are ``run_meta.json`` contents. The base run is the main run of the same algorithm, density and seed with
+    ``supplementary_base_reward(reward)``. Checks the registry entry, that the declared values hold (resolved against the
+    MAIN run's hyperparameters, so ``FromBase`` follows the defaults the main grid used), that every other hyperparameter,
+    the budget and the env config are identical, and the reward weights unless the run uses a supplementary reward.
+    """
+    registry = SUPPLEMENTARY_RUNS if registry is None else registry
+    s_id, m_id = supp_meta["identity"], main_meta["identity"]
+    variant = s_id["variant"]
+    spec = registry.get(variant.removeprefix(SUPPLEMENTARY_PREFIX)) if is_supplementary_variant(variant) else None
+    if spec is None:
+        raise ValueError(f"{variant!r} is not a registered supplementary run")
+    problems: list[str] = []
+    if m_id["variant"] != MAIN_VARIANT:
+        problems.append(f"the reference run must be the main variant, got {m_id['variant']!r}")
+    for key in ("algorithm", "train_density", "seed"):
+        if s_id[key] != m_id[key]:
+            problems.append(f"identity.{key}: supplementary {s_id[key]!r} vs main {m_id[key]!r}")
+    if m_id["train_reward"] != supplementary_base_reward(s_id["train_reward"]):
+        problems.append(f"the reference run must have the reward {supplementary_base_reward(s_id['train_reward'])!r}, "
+                        f"got {m_id['train_reward']!r}")
+    if s_id["algorithm"] != spec.algo or s_id["train_reward"] not in spec.rewards or s_id["seed"] not in spec.seeds:
+        problems.append(f"algorithm / reward / seed outside the registry entry {spec}")
+    s_hp, m_hp = supp_meta["hyperparameters"], main_meta["hyperparameters"]
+    declared = spec.resolved_overrides(CONFIG_CLASSES[spec.algo].from_dict(m_hp)) if spec.algo == m_id["algorithm"] else {}
+    if sorted(s_id["overridden_keys"]) != sorted(declared):
+        problems.append(f"overridden keys {sorted(s_id['overridden_keys'])}, declared {sorted(declared)}")
+    for key in sorted(set(s_hp) | set(m_hp)):
+        if key in declared:
+            if s_hp.get(key) != _to_jsonable(declared[key]):
+                problems.append(f"{key}: declared {declared[key]!r}, got {s_hp.get(key)!r}")
+        elif s_hp.get(key) != m_hp.get(key):
+            problems.append(f"{key}: not declared but differs, supplementary {s_hp.get(key)} vs main {m_hp.get(key)}")
+    if supp_meta["budget"] != main_meta["budget"]:
+        problems.append(f"budget differs: supplementary {supp_meta['budget']} vs main {main_meta['budget']}")
+    s_env, m_env = supp_meta.get("env"), main_meta.get("env")
+    if s_env and m_env:  # not yet described when a run is checked before it starts
+        keys = ("env_id", "config") if is_supplementary_reward(s_id["train_reward"]) else ("env_id", "config", "reward_weights")
+        for key in keys:
+            if s_env.get(key) != m_env.get(key):
+                problems.append(f"env.{key} differs between the supplementary run and the main run")
+    if problems:
+        raise ValueError(
+            f"supplementary run {variant!r} (seed {s_id['seed']}) does not match its main-grid base run:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
+validate_supplementary_runs(SUPPLEMENTARY_RUNS)

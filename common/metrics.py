@@ -60,7 +60,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from common.actions import ACTION_NAMES
-from common.config import BASE_CONFIG, REWARDS, TARGET_CONSECUTIVE, TARGET_PERFORMANCE
+from common.config import BASE_CONFIG, REWARDS, TARGET_CONSECUTIVE, TARGET_PERFORMANCE, reward_weights
 
 NEAR_MISS_TTC = 1.5  # [s] near miss = not crashed and min TTC below this
 # A lane change that undoes the previous one within this many steps (= seconds at policy_frequency
@@ -245,11 +245,9 @@ def recompute_return(df: pd.DataFrame, reward_name: str) -> pd.Series:
     ``crashed`` flags equals ``crashed``). For ``"default"`` the env's own return ``return_env``
     is returned.
     """
-    if reward_name not in REWARDS:
-        raise ValueError(f"Unknown reward {reward_name!r}; choose from {list(REWARDS)}")
+    w = reward_weights(reward_name)  # REWARDS or SUPPLEMENTARY_REWARDS; raises on an unknown name
     if reward_name == "default":
         return df["return_env"].astype(float)
-    w = REWARDS[reward_name]
     return (
         w["w_speed"] * df["sum_high_speed"]
         + w["w_right"] * df["sum_right_lane"]
@@ -259,7 +257,10 @@ def recompute_return(df: pd.DataFrame, reward_name: str) -> pd.Series:
 
 
 def add_return_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy of ``df`` with a ``return_<preset>`` column for every reward preset."""
+    """Return a copy of ``df`` with a ``return_<preset>`` column for every preset of ``REWARDS``.
+
+    Supplementary presets (``SUPPLEMENTARY_REWARDS``) get no column (the log schemas stay fixed); use ``recompute_return``.
+    """
     out = df.copy()
     for name in REWARDS:
         out[f"return_{name}"] = recompute_return(df, name)
