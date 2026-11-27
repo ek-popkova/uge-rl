@@ -1,46 +1,164 @@
 \section{Reward Design}\label{sec:reward}
 
 \subsection{State of the art}\label{sec:sota-reward}
-\todo{Draft and extend.}
-\begin{itemize}
-  \item \textbf{Reward shaping:} additional reward terms can speed up learning; potential-based shaping
-        preserves optimal policies~\cite{ng1999shaping}, arbitrary shaping does not.
-  \item \textbf{Reward hacking / specification gaming:} agents exploit gaps between the
-        specified reward and the intended behaviour~\cite{amodei2016concrete,krakovna2020gaming}.
-  \item \textbf{Safe RL:} constrained MDPs~\cite{altman1999cmdp} and Lagrangian methods~\cite{achiam2017cpo,ray2019safexp};
-        shielding~\cite{alshiekh2018shielding} filters unsafe actions at run time.
-  \item \textbf{Consequence for this work:} a large collision penalty only changes the \emph{expected return}; it is
-        not a guarantee of collision avoidance.
-\end{itemize}
+\todo{Draft with verified references: reward shaping (potential-based shaping preserves optimal policies,
+arbitrary shaping does not); reward hacking and specification gaming; safe RL (constrained MDPs, Lagrangian methods,
+shielding). Consequence for this work: a large collision penalty only changes the \emph{expected return}; it is not a
+guarantee of collision avoidance.}
 
 \subsection{Reward configurations}\label{sec:reward-configs}
-All custom rewards are a weighted sum of terms computed by the reward wrapper (\code{common/rewards.py}):
+
+\paragraph{Design goals.}
+The assignment asks for the default \env{HighwayEnv} reward and at least one alternative that rewards driving at an
+appropriate speed, penalizes collisions, and penalizes undesirable lane positioning and unnecessary lane changes, with
+three configurations: efficiency-oriented, safety-oriented and balanced. We therefore keep the environment's default
+reward as a reference and define three custom variants that share one functional form and differ only in their
+weights. All variants are used with both algorithms, and the weights were fixed before any agent was trained: they
+were chosen from simple, interpretable considerations and checked only on scripted baseline policies, never tuned on
+the learning curves of \ddqn{} or \ppo{}. This avoids the trial-and-error reward tuning that Knox et
+al.~\cite{knox2023reward} identify as a source of unfair algorithm comparisons, since weights tuned with one
+algorithm tend to favor it.
+
+\paragraph{Reward function.}
+All custom rewards are computed per step by a wrapper around the environment (\code{common/rewards.py}) from the
+reward components that \env{HighwayEnv}~\cite{highway-env} reports, without the environment's normalization:
 \begin{equation}
-  r_t = w_{\mathrm{speed}}\, r^{\mathrm{speed}}_t + w_{\mathrm{col}}\, r^{\mathrm{col}}_t + w_{\mathrm{lane}}\, r^{\mathrm{lane}}_t,
+  r_t = w_{\mathrm{speed}}\, r^{\mathrm{speed}}_t + w_{\mathrm{right}}\, r^{\mathrm{right}}_t
+        - w_{\mathrm{col}}\, c_t - w_{\mathrm{lane}}\, \ell_t,
   \label{eq:reward}
 \end{equation}
-\todo{Define each term precisely: normalised speed reward, collision indicator, lane-change penalty.}
+where
+\begin{itemize}
+  \item $r^{\mathrm{speed}}_t \in [0,1]$ is the high-speed component of \env{HighwayEnv}: the forward speed mapped
+  linearly from the default range $[20, 30]$\,m/s to $[0,1]$ and clipped;
+  \item $r^{\mathrm{right}}_t \in [0,1]$ is the right-lane component: the index of the target lane divided by the
+  number of lanes minus one, so 1 in the rightmost lane and 0 in the leftmost; it encodes the keep-right rule;
+  \item $c_t \in \{0,1\}$ indicates a collision, after which the episode terminates;
+  \item $\ell_t \in \{0,1\}$ is 1 if the vehicle's actual lane index changed during the step (a completed lane change,
+  not the chosen action). This term is applied by the wrapper because \env{HighwayEnv}~1.12.1 ignores the
+  \code{lane\_change\_reward} configuration key.
+\end{itemize}
+We do not use the environment's reward normalization (\cref{eq:default-reward}). It maps the reward to $[0,1]$,
+so every step earns a non-negative reward, including the step of a collision. The only deterrent against crashing is
+then the survival reward forgone after the crash, which depends on when the crash happens rather than on how large it
+is; a larger collision weight only raises this survival bonus and shrinks the speed signal relative to it. Without
+normalization, $w_{\mathrm{col}}$ is a direct penalty and the survival bonus disappears.
 
-\begin{description}
-  \item[Default] reward of the underlying \env{HighwayEnv}, unchanged.
-  \item[Reward A (efficiency)] emphasises speed and progress, with a collision penalty.
-  \item[Reward B (safety)] weights collision avoidance more and discourages aggressive manoeuvres.
-  \item[Reward C (balanced)] combines speed, safety and smooth driving.
-\end{description}
+\paragraph{Weights.}
+\Cref{tab:reward-weights} lists the three custom variants and the assignment's labels: Reward~A is efficiency,
+Reward~B safety and Reward~C balanced. The weights were set as round values that express the
+intended priorities: the speed weight decreases and the collision weight increases from efficiency to safety, and
+the keep-right and lane-change terms are absent from the efficiency variant and grow towards safety. In the safety
+variant the lane-change penalty (0.5) exceeds the largest reward of a single step ($0.2 + 0.1 = 0.3$), so a safety
+agent should change lanes only rarely, even when a lane change would help in dense traffic. The weights are defined
+in \code{REWARDS} in \code{common/config.py}.
 
 \begin{table}[H]
   \centering
-  \caption{Reward weights.}
+  \small
+  \caption{Reward weights of \cref{eq:reward}. The default configuration is the normalized reward of
+  \env{HighwayEnv}, unchanged.}
   \label{tab:reward-weights}
-  \begin{tabular}{@{}lccc@{}}
+  \begin{tabularx}{\linewidth}{@{}llccccX@{}}
     \toprule
-    Configuration & $w_{\mathrm{speed}}$ & $w_{\mathrm{col}}$ & $w_{\mathrm{lane}}$ \\
+    Variant & Assignment & $w_{\mathrm{speed}}$ & $w_{\mathrm{right}}$ & $w_{\mathrm{col}}$ & $w_{\mathrm{lane}}$ & Intended behavior \\
     \midrule
-    Default           & \multicolumn{3}{c}{HighwayEnv default} \\
-    A (efficiency)    & -- & -- & -- \\
-    B (safety)        & -- & -- & -- \\
-    C (balanced)      & -- & -- & -- \\
+    Default    & default & \multicolumn{4}{c}{\env{HighwayEnv} default (normalized)} & Reference \\
+    Efficiency & Reward A & 0.8 & 0.0 & 15 & 0.0 & Speed first, lane position irrelevant, tolerant of risk \\
+    Safety     & Reward B & 0.2 & 0.1 & 30 & 0.5 & Weak speed incentive, harsh collision penalty, costly lane changes \\
+    Balanced   & Reward C & 0.4 & 0.1 & 20 & 0.1 & Moderate speed, keep right, mild lane-change penalty \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Sanity check of the weights}\label{sec:reward-check}
+
+\paragraph{Preference ordering and indifference point.}
+Knox et al.~\cite{knox2023reward} propose sanity checks for driving rewards based on a few idealized trajectories.
+The preference-ordering test requires that a trajectory that crashes halfway is less preferred than a safe one that
+does not drive, and the safe one less than a successful trip. The indifference-point test then asks at which success
+probability $p$ a gamble between success and crash is worth exactly as much as the safe alternative:
+\begin{equation}
+  G(\tau_{\mathrm{slow}}) = p\, G(\tau_{\mathrm{succ}}) + (1-p)\, G(\tau_{\mathrm{crash}})
+  \quad\Longrightarrow\quad
+  p = \frac{G(\tau_{\mathrm{slow}}) - G(\tau_{\mathrm{crash}})}{G(\tau_{\mathrm{succ}}) - G(\tau_{\mathrm{crash}})}.
+  \label{eq:indifference}
+\end{equation}
+A policy that crashes more often than $1-p$ is worse, under the reward, than refusing to drive fast at all, so $p$
+measures the risk the reward tolerates. Because the ego vehicle in \env{HighwayEnv} cannot stay parked, we replace
+the idle trajectory of Knox et al.\ with slow safe driving. With episodes of $T = 30$ steps (30\,s at one decision per
+second), all in the right lane and without lane changes, the idealized trajectories are: success, $T$ steps at
+30\,m/s ($r^{\mathrm{speed}} = 1$); slow, $T$ steps at 20\,m/s ($r^{\mathrm{speed}} = 0$); crash, a collision at step
+$T/2$ at 25\,m/s ($r^{\mathrm{speed}} = 0.5$). Their undiscounted returns are
+\begin{equation}
+  G_{\mathrm{succ}} = T\,(w_{\mathrm{speed}} + w_{\mathrm{right}}), \qquad
+  G_{\mathrm{slow}} = T\, w_{\mathrm{right}}, \qquad
+  G_{\mathrm{crash}} = \tfrac{T}{2}\,(0.5\, w_{\mathrm{speed}} + w_{\mathrm{right}}) - w_{\mathrm{col}}.
+  \label{eq:idealized-returns}
+\end{equation}
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Returns of the idealized trajectories and analytic indifference points ($T = 30$, no discounting).}
+  \label{tab:reward-analytic}
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Variant & $G_{\mathrm{crash}}$ & $G_{\mathrm{slow}}$ & $G_{\mathrm{succ}}$ & Ordering & Analytic $p$ \\
+    \midrule
+    Default    & 12.3    & 22.0 & 30.0 & holds & 0.55 \\
+    Efficiency & $-9.0$  & 0.0 & 24.0 & holds & 0.27 \\
+    Balanced   & $-15.5$ & 3.0 & 15.0 & holds & 0.61 \\
+    Safety     & $-27.0$ & 3.0 & 9.0  & holds & 0.83 \\
     \bottomrule
   \end{tabular}
 \end{table}
-\todo{Final values; must match \code{REWARDS} in \code{common/config.py}.}
+
+All three variants pass the ordering test (\cref{tab:reward-analytic}), and their indifference points increase from
+efficiency to safety, so the intended gradient of caution is reflected in the reward and not only in the names. The
+default reward passes as well, but its crash costs only the survival reward forgone after it. Analytically, much
+smaller collision penalties would already keep the ordering ($w_{\mathrm{col}} > 6$ for efficiency, $> 1.5$ for
+balanced, $> 0$ for safety); the binding case is the empirical check below at low density, where crashes happen later
+and therefore cost less relative to the reward already collected. Among round values, 15, 20 and 30 are the smallest
+that pass this check at every density while keeping the gradient between the variants.
+
+\paragraph{Empirical check on scripted policies.}
+The idealized trajectories ignore when crashes actually happen and which lane a slow vehicle uses, so we repeated the
+check on simulated episodes of the four scripted policies of \cref{sec:baseline}, 50 episodes per policy and
+density, with a 2,000-resample bootstrap; no agent was trained for this check. $G_{\mathrm{crash}}$ pools the crashed
+episodes of all policies, $G_{\mathrm{slow}}$ comes from the slower policy, and $G_{\mathrm{succ}}$ from non-crashed
+episodes of the faster policy (of the idle policy where fewer than five exist).
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Empirical indifference points on scripted policies (undiscounted returns; 5--95\% bootstrap intervals in
+  brackets).}
+  \label{tab:reward-empirical}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Variant & Low density & Medium (training) & High density & Analytic \\
+    \midrule
+    Efficiency & 0.11 (0.06--0.15) & 0.36 (0.33--0.38) & 0.46 (0.45--0.47) & 0.27 \\
+    Balanced   & 0.55 (0.53--0.56) & 0.73 (0.72--0.75) & 0.74 (0.72--0.76) & 0.61 \\
+    Safety     & 0.82 (0.81--0.83) & 0.90 (0.89--0.92) & 0.89 (0.88--0.91) & 0.83 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+With undiscounted returns and with $\gam = 0.99$, the ordering holds for every variant at every density, and the
+empirical indifference points keep the order efficiency $<$ balanced $<$ safety with non-overlapping bootstrap
+intervals (\cref{tab:reward-empirical}). The deviations from the analytic values follow from the crash time (later at
+low density, earlier at high density) and from the success reference, which at medium and high density is the idle
+policy at 25\,m/s rather than 30\,m/s. With $\gam = 0.99$ the empirical indifference points change by at most 0.04
+(efficiency 0.07 / 0.34 / 0.46, balanced 0.53 / 0.73 / 0.75, safety 0.81 / 0.90 / 0.90 at low / medium / high
+density). With $\gam = 0.9$ or $0.8$ a late crash is discounted so strongly that the
+efficiency and balanced variants fail the ordering at some densities, and only the safety variant passes everywhere.
+We therefore train both algorithms with $\gam \geq 0.99$.
+
+\paragraph{What the check does not guarantee.}
+The check shows that the rewards rank idealized and scripted outcomes in the intended order; it does not show that a
+learned policy will avoid collisions. A collision penalty only changes the expected return, and an agent can still
+accept a crash risk below $1-p$, or fail to find a safe policy within the training budget. Returns are also not
+comparable across variants, since a collision costs 15, 20 or 30, so the variants are compared through driving
+behavior (collision rate, speed, completed episodes, lane use) rather than return.
