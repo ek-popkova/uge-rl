@@ -10,8 +10,9 @@ Print the reward weights and their analytic indifference points with:  python -m
 
 from __future__ import annotations
 
+import math
 from itertools import combinations
-from typing import Any
+from typing import Any, Mapping
 
 from common.seeding import MAX_ENVS_PER_RUN, derived_env_seeds
 
@@ -63,6 +64,33 @@ REWARDS: dict[str, dict[str, float]] = {
     "balanced": {"w_speed": 0.4, "w_right": 0.1, "w_collision": 20.0, "w_lane": 0.1},
     "safety": {"w_speed": 0.2, "w_right": 0.1, "w_collision": 30.0, "w_lane": 0.5},
 }
+REWARD_WEIGHT_KEYS = ("w_speed", "w_right", "w_collision", "w_lane")
+
+# Supplementary reward presets (experiment (b) of the report), pre-declared like REWARDS but NEVER part of the main grid,
+# the tuning, the sensitivity runs or the DDQN vs PPO tables: only a registered supplementary run
+# (common.train_config.SUPPLEMENTARY_RUNS, variant "supp-<name>") may train with one (common.train_config.check_run_roles), and
+# common.aggregate drops them from the result tables. Same four weights as REWARDS; names must differ from REWARDS. Fixed
+# analytically before the runs (indifference_point below; the ordering G_crash < G_slow < G_succ must hold), never after
+# seeing results. Adding one is a one-line change here plus the run entry that uses it. No entry yet.
+SUPPLEMENTARY_REWARDS: dict[str, dict[str, float]] = {}
+
+
+def is_supplementary_reward(name: str) -> bool:
+    return name in SUPPLEMENTARY_REWARDS
+
+
+def reward_weights(name: str) -> dict[str, float]:
+    """Weights of a reward preset of ``REWARDS`` or ``SUPPLEMENTARY_REWARDS`` (a copy); unknown names raise."""
+    if name in REWARDS:
+        return dict(REWARDS[name])
+    if name in SUPPLEMENTARY_REWARDS:
+        return dict(SUPPLEMENTARY_REWARDS[name])
+    raise ValueError(f"Unknown reward {name!r}; choose from {list(REWARDS)} or the supplementary {list(SUPPLEMENTARY_REWARDS)}")
+
+
+def all_reward_names() -> list[str]:
+    """``REWARDS`` followed by ``SUPPLEMENTARY_REWARDS`` (CLI choices, path validation)."""
+    return [*REWARDS, *SUPPLEMENTARY_REWARDS]
 
 # Minimum discount factor for training. With gamma <= 0.9 a late crash is discounted so much that
 # the lighter reward variants can rank a crash above slow safe driving.
@@ -135,6 +163,28 @@ def indifference_point(w_speed: float, w_right: float, w_collision: float, T: in
     if not g_crash < g_slow < g_succ:
         return None
     return (g_slow - g_crash) / (g_succ - g_crash)
+
+
+def check_supplementary_rewards(presets: Mapping[str, Mapping[str, float]]) -> None:
+    """Validate supplementary reward presets (``SUPPLEMENTARY_REWARDS`` at import, any candidate dict in tests).
+
+    Each name is new (not in ``REWARDS``), the weights are exactly ``REWARD_WEIGHT_KEYS``, finite and non-negative, and the
+    preference ordering of ``indifference_point`` holds (a crash is worse than slow safe driving, which is worse than success).
+    """
+    for name, w in presets.items():
+        if name in REWARDS:
+            raise ValueError(f"supplementary reward {name!r} shadows a REWARDS preset")
+        if not name or not all(c.isalnum() or c in "_-" for c in name):
+            raise ValueError(f"supplementary reward name {name!r}: use letters, digits, _ and - only")
+        if set(w) != set(REWARD_WEIGHT_KEYS):
+            raise ValueError(f"supplementary reward {name!r} must set exactly {REWARD_WEIGHT_KEYS}, got {sorted(w)}")
+        if not all(math.isfinite(float(v)) and float(v) >= 0 for v in w.values()):
+            raise ValueError(f"supplementary reward {name!r}: weights must be finite and >= 0, got {dict(w)}")
+        if indifference_point(w["w_speed"], w["w_right"], w["w_collision"], T=BASE_CONFIG["duration"]) is None:
+            raise ValueError(f"supplementary reward {name!r}: the ordering G_crash < G_slow < G_succ fails")
+
+
+check_supplementary_rewards(SUPPLEMENTARY_REWARDS)
 
 
 # Seeds. Disjoint roles; see docs/evaluation_protocol.md and common/seeding.py.

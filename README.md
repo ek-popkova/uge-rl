@@ -13,7 +13,7 @@ conditions, so all shared code lives in the `common/` package.
 .
 ├── common/       # shared code (see below): env config and factory, rewards, evaluation, metrics, training harness
 ├── ddqn/         # Double DQN implementation (stub: agent.py, train.py with the algorithm still to write)
-├── ppo/          # PPO implementation (stub)
+├── ppo/          # PPO implementation: PPO-Clip and PPO-KL (core.py math, train.py trainer, agent.py; see ppo/README.md)
 ├── scripts/      # scripted baselines, video recording (the only script that renders), pilot experiments (scripts/pilot/)
 ├── tests/        # pytest: config, rewards, evaluation protocol, metrics, training harness (RandomTrainer end to end)
 ├── docs/         # config_decisions.md, evaluation_protocol.md, performance_analysis.md
@@ -122,9 +122,9 @@ python -m scripts.eval_baselines --workers 8 [--resume]
 
 ## Training
 
-The algorithms are still stubs, but the whole experiment-tracking infrastructure is in place: a run is the shared
-harness `common.training.TrainingRun` plus an algorithm `Trainer` (`ddqn/train.py`, `ppo/train.py`; they currently
-stop with `NotImplementedError` before anything is written). Everything the comparisons need is then logged
+PPO is implemented (`ppo/README.md`); DDQN is still a stub. A run is the shared harness `common.training.TrainingRun`
+plus an algorithm `Trainer` (`ddqn/train.py`, `ppo/train.py`; the DDQN stub stops with `NotImplementedError` before
+anything is written). Everything the comparisons need is then logged
 automatically and identically for both algorithms, with `env_step` (environment transitions, summed over vector envs)
 as the x-axis.
 
@@ -158,14 +158,20 @@ Tuning and sensitivity runs (rules in `docs/config_decisions.md`; log in `docs/t
 ```bash
 python -m ddqn.train --reward balanced --seed 99 --variant tune-lr-high --set lr=0.001   # tuning run, seed 99, at most 4 per algorithm
 python -c "from common.train_config import expand_sensitivity_grid as g; [print(r.algo, r.variant, r.seed) for r in g()]"   # the 24 sensitivity runs
+python -c "from common.train_config import expand_supplementary_runs as g; [print(' '.join(r.cli_args())) for r in g()]"   # the registered supplementary runs
 ```
+
+Every run has exactly one role (`common.train_config.check_run_roles`): `main`, a sensitivity point, `tune-<name>` or a
+supplementary run `supp-<name>` declared in `SUPPLEMENTARY_RUNS`; any other variant is refused unless its budget really differs from the frozen `TrainBudget`
+(debug runs). Supplementary runs and supplementary reward presets (`common.config.SUPPLEMENTARY_REWARDS`) never enter a DDQN vs PPO
+table.
 
 Files written per run (schemas in `common/train_logging.py`, described in `docs/evaluation_protocol.md` section 11):
 
 | File | Content |
 |---|---|
 | `train_log.csv` | one row per training episode: all per-episode metrics of the evaluation (return under the training and the default reward, crash, speed, lane changes, action histogram, lane occupancy, reversals, near-miss steps, overtakes, ...) |
-| `update_log.csv` | one row per K gradient updates: lr, loss, grad norm, update time; DDQN: TD loss, Q statistics, epsilon, buffer size; PPO: policy / value loss, entropy, approx KL, clip fraction, explained variance, epochs done |
+| `update_log.csv` | one row per K gradient updates: lr, loss, grad norm, update time; DDQN: TD loss, Q statistics, epsilon, buffer size; PPO: policy / value loss, entropy, approx KL, clip fraction, explained variance, epochs done, max ratio, KL penalty coefficient, exact KL after the update. `update_idx` counts optimizer steps for both algorithms (PPO: all minibatch steps of a rollout) |
 | `val_log.csv` | one row per validation on `VAL_SEEDS`: all summary metrics, `return_<preset>` for every reward preset, wall time without validation, cumulative env / update / validation / checkpoint time |
 | `run_meta.json` | identity, hyperparameters, budget, the resolved env config, git commit, versions, hardware, threads, timing split, steps/s, benchmark, parameter count, inference time, status |
 | `final.pt`, `milestone_<p>pct.pt`, `resume.pt` | final weights, weights at fractions of the budget (for early vs late videos), full state for `--resume` |

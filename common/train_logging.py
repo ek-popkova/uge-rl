@@ -8,9 +8,13 @@ column means: change the constants, ``tests/test_training.py`` and ``docs/evalua
                     episode end), ``wall_s``, ``vec_env`` (env index, 0 for a single env) and every column
                     of ``common.metrics.EPISODE_COLUMNS`` (same code as the test CSVs).
 ``update_log.csv``  one row per ``update_log_every`` (K) calls of ``log_update``: ``UPDATE_LOG_COLUMNS[algo]``.
-                    ``update_idx`` counts gradient updates cumulatively, ``updates_in_row`` is the number of
-                    gradient updates in the row. The K calls of a row are combined by the rule of each column in
-                    ``UPDATE_AGG`` (one rule per column, the same for both algorithms; see below).
+                    ``update_idx`` counts gradient updates (optimizer steps) cumulatively, ``updates_in_row`` is
+                    the number of gradient updates in the row; the same unit for both algorithms (DDQN: one call
+                    per gradient step; PPO: one call per rollout with ``n_updates`` = its minibatch steps). The
+                    optional ``n_samples`` of each call (per-sample gradient evaluations) is summed into
+                    ``sample_idx`` (``run_meta.json`` ``timing.n_gradient_samples``). The K calls of a row are
+                    combined by the rule of each column in ``UPDATE_AGG`` (one rule per column, the same for both
+                    algorithms; see below).
 ``val_log.csv``     one row per validation: ``VAL_LOG_COLUMNS`` = ``val_idx``, ``env_step``, ``wall_s``,
                     ``train_wall_s`` (wall time without validation), cumulative env / update / val /
                     checkpoint seconds, the full ``summarize_metrics`` output and ``return_<preset>``
@@ -22,13 +26,16 @@ single value, so PPO rows are exact):
     env_step, update_idx, wall_s   value at the last call of the window
     updates_in_row                 sum of ``n_updates``
     mean   loss, grad_norm, td_loss, q_mean, target_q_mean, policy_loss, value_loss, entropy, approx_kl,
-           clip_fraction, explained_variance, n_epochs_done   (typical level over the window)
+           clip_fraction, explained_variance, n_epochs_done, kl_after_update   (typical level over the window)
+           (kl_after_update: PPO, exact mean KL(pi_old || pi_new) over the rollout after all epochs)
     max    q_max            overestimation spikes must survive: the max over the window of the per-call max
+           ratio_max        PPO: largest probability ratio (clipping does not bound a single step)
            grad_norm_max    DERIVED by the logger from ``grad_norm`` (algorithms report only ``grad_norm``):
                             gradient spikes are the usual sign of instability; the mean ``grad_norm`` next to it
                             shows the typical level
     sum    update_time_s    total time spent updating in the window
-    last   lr, epsilon, buffer_size   state variables, the value at the end of the window
+    last   lr, epsilon, buffer_size, kl_beta   state variables, the value at the end of the window
+           (kl_beta: PPO-KL penalty coefficient; NaN for PPO-Clip, which has none)
 
 Rows are buffered in memory and written by ``maybe_flush`` / ``flush`` (called by the harness between
 training chunks, never inside the step loop). On ``--resume``, ``truncate_to(env_step)`` drops every row
@@ -60,7 +67,7 @@ UPDATE_ALGO_METRICS = {
     "ddqn": ["td_loss", "q_mean", "q_max", "target_q_mean", "epsilon", "buffer_size"],
     "ppo": [
         "policy_loss", "value_loss", "entropy", "approx_kl", "clip_fraction", "explained_variance",
-        "n_epochs_done",
+        "n_epochs_done", "ratio_max", "kl_beta", "kl_after_update",
     ],
 }
 # Columns computed by the logger from a reported metric (not accepted as input): column -> (source, rule).
@@ -72,7 +79,9 @@ UPDATE_LOG_COLUMNS = {
     ]
     for algo, extra in UPDATE_ALGO_METRICS.items()
 }
-# How the metrics of the K calls of one row are combined: "mean" (NaN ignored), "max", "sum" or "last".
+# How the metrics of the K calls of one row are combined: "mean", "max", "sum" or "last". The rule itself does not
+# skip NaN (``mean`` is sum / count); ``_emit_update_row`` drops NaN values before applying any rule, and a column
+# whose values are all NaN (or never reported) stays NaN.
 # One deliberate rule per metric, independent of the algorithm (see the module docstring); an import-time check
 # below makes sure no metric is left without a rule.
 UPDATE_AGG = {
@@ -93,6 +102,9 @@ UPDATE_AGG = {
     "clip_fraction": "mean",
     "explained_variance": "mean",
     "n_epochs_done": "mean",
+    "ratio_max": "max",
+    "kl_beta": "last",
+    "kl_after_update": "mean",
 }
 _AGG_RULES = {
     "mean": lambda v: sum(v) / len(v),
@@ -260,6 +272,9 @@ class TrainLogger:
         self._allowed_update_keys = set(UPDATE_COMMON_METRICS) | set(UPDATE_ALGO_METRICS[algo])
         self.n_episodes = 0
         self.update_idx = 0  # gradient updates so far
+        # Per-sample gradient evaluations so far (sum of the minibatch sizes of the gradient updates). None as soon as
+        # one log_update call did not report n_samples: an incomplete count is never stored as if it were complete.
+        self.sample_idx: Optional[int] = 0
         self.val_idx = 0
         self._pending: list[tuple[int, int, dict[str, float]]] = []  # (env_step, n_updates, metrics) of the open window
         self._last_update_seconds = 0.0  # timers.seconds["update"] at the last log_update
@@ -271,12 +286,19 @@ class TrainLogger:
         self.n_episodes += 1
         self.tables["train"].add({"env_step": env_step, "wall_s": self.timers.wall(), "vec_env": vec_env, **record})
 
-    def log_update(self, env_step: int, n_updates: int = 1, **metrics: float) -> None:
+    def log_update(self, env_step: int, n_updates: int = 1, n_samples: Optional[int] = None, **metrics: float) -> None:
         """Report one gradient update (or ``n_updates`` of them) with its metrics.
 
+        ``n_updates`` counts optimizer steps (DDQN: one per gradient step; PPO: every minibatch step of the rollout).
+        ``n_samples`` is the number of per-sample gradient evaluations of these updates (the sum of their minibatch
+        sizes); if any call omits it, ``sample_idx`` becomes None (unknown) for the rest of the run.
         ``update_time_s`` is filled from the ``timers.update()`` time since the previous call unless
         given. Call it after the ``with timers.update():`` block it describes.
         """
+        if n_updates < 1:
+            raise ValueError(f"n_updates must be >= 1, got {n_updates}")
+        if n_samples is not None and n_samples < n_updates:
+            raise ValueError(f"n_samples ({n_samples}) must be >= n_updates ({n_updates}): one sample per update at least")
         unknown = set(metrics) - self._allowed_update_keys
         if unknown:
             raise KeyError(
@@ -286,6 +308,7 @@ class TrainLogger:
         metrics.setdefault("update_time_s", spent - self._last_update_seconds)
         self._last_update_seconds = spent
         self.update_idx += n_updates
+        self.sample_idx = None if (self.sample_idx is None or n_samples is None) else self.sample_idx + int(n_samples)
         self._pending.append((env_step, n_updates, {k: float(v) for k, v in metrics.items()}))
         if len(self._pending) >= self.update_log_every:
             self._emit_update_row()
@@ -353,6 +376,7 @@ class TrainLogger:
         return {
             "n_episodes": self.n_episodes,
             "update_idx": self.update_idx,
+            "sample_idx": self.sample_idx,
             "val_idx": self.val_idx,
             "pending": list(self._pending),
             "last_update_seconds": self._last_update_seconds,
@@ -361,6 +385,8 @@ class TrainLogger:
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         self.n_episodes = int(state["n_episodes"])
         self.update_idx = int(state["update_idx"])
+        sample_idx = state.get("sample_idx")  # absent in checkpoints written before the sample count existed: unknown
+        self.sample_idx = None if sample_idx is None else int(sample_idx)
         self.val_idx = int(state["val_idx"])
         self._pending = [(int(e), int(n), dict(m)) for e, n, m in state["pending"]]
         self._last_update_seconds = float(state["last_update_seconds"])

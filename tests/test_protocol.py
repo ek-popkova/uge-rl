@@ -62,11 +62,13 @@ def test_shared_decisions_are_frozen_and_equal_for_both_algorithms():
     assert p.ppo_shared_trunk is False  # separate actor and critic
     assert TrainBudget().milestone_fractions == (0.1, 0.25, 0.5)
     check_comparable(d, p)
-    # none of the decided values is a placeholder any more; the rest still is
+    # none of the decided values is a placeholder any more; DDQN's algorithm-specific values still are,
+    # PPO's were decided by tuning (docs/tuning_log.md)
     for cls in (DDQNConfig, PPOConfig):
         names = {n.split(".")[1] for n in placeholders_in_use(cls())}
         assert not names & {"gamma", "hidden_sizes", "activation", "obs_flatten", "ppo_shared_trunk", "device"}
-        assert {"lr", "max_grad_norm"} <= names
+    assert {"lr", "max_grad_norm"} <= {n.split(".")[1] for n in placeholders_in_use(DDQNConfig())}
+    assert placeholders_in_use(PPOConfig()) == []
     # the budget is frozen after the calibration (tests/test_frozen_values.py); only algorithm-specific values are placeholders
     assert placeholders_in_use(TrainBudget()) == []
     assert TrainBudget().checkpoint_every_env_steps == 10_000
@@ -114,17 +116,18 @@ def test_tuning_variant_names_and_exclusion_flag():
 
 
 def test_check_run_roles():
-    ok = dict(variant="tune-a", seed=PILOT_RUN_SEED, reward="balanced", density="medium", overridden=["lr"],
-              budget_overrides=[])
+    ok = dict(variant="tune-a", seed=PILOT_RUN_SEED, reward="balanced", density="medium", overrides={"lr": 1e-3},
+              budget_overrides=[], algo="ddqn")
     check_run_roles(**ok)
-    check_run_roles("main", 0, "safety", "low", [], [])  # an ordinary run is untouched
+    check_run_roles("main", 0, "safety", "low", {}, [], algo="ddqn")  # an ordinary run is untouched
     for change, match in (({"seed": 0}, "seed"), ({"reward": "safety"}, "reward"), ({"density": "low"}, "density"),
-                          ({"overridden": ["gamma"]}, "shared"), ({"overridden": ["lr", "hidden_sizes"]}, "shared"),
+                          ({"overrides": {"gamma": 0.995}}, "shared"),
+                          ({"overrides": {"lr": 1e-3, "hidden_sizes": (64, 64)}}, "shared"),
                           ({"budget_overrides": ["total_env_steps"]}, "budget")):
         with pytest.raises(ValueError, match=match):
             check_run_roles(**{**ok, **change})
     with pytest.raises(ValueError, match="reserved"):  # run seed 99 never writes into main or a sensitivity variant
-        check_run_roles("main", PILOT_RUN_SEED, "balanced", "medium", [], [])
+        check_run_roles("main", PILOT_RUN_SEED, "balanced", "medium", {}, [], algo="ddqn")
 
 
 def test_resolve_setup_enforces_the_tuning_roles(tmp_path):
@@ -236,7 +239,7 @@ def test_sensitivity_grid_expands_to_24_runs_skipping_the_base_values():
     for r in runs:
         by_setting.setdefault((r.algo, r.variant), []).append(r.seed)
     assert all(seeds == SENSITIVITY_SEEDS for seeds in by_setting.values())  # 3 seeds per setting
-    # absolute values for the CURRENT placeholder bases (lr 5e-4 / 3e-4, eps_decay_fraction 0.3, clip_range 0.2)
+    # absolute values for the CURRENT bases (DDQN placeholders lr 5e-4, eps_decay_fraction 0.3; PPO decided lr 3e-4, clip_range 0.2)
     assert sorted(by_setting) == sorted([
         ("ddqn", "lr=0.000166667"), ("ddqn", "lr=0.0015"),
         ("ddqn", "eps_decay_fraction=0.1"), ("ddqn", "eps_decay_fraction=0.5"),
@@ -311,7 +314,7 @@ def test_eps_decay_fraction_is_resolved_to_absolute_steps():
     assert [cfg.eps_decay_steps(n) for n in (100_000, 150_000, 200_000, 300_000)] == [30_000, 45_000, 60_000, 90_000]
     assert DDQNConfig(eps_decay_fraction=1e-9).eps_decay_steps(1000) == 1  # never 0
     assert resolve_hyperparameters(cfg, TrainBudget(total_env_steps=200_000)) == {"eps_decay_steps": 60_000}
-    assert resolve_hyperparameters(PPOConfig(), TrainBudget()) == {"rollout_size": 1000}
+    assert resolve_hyperparameters(PPOConfig(), TrainBudget()) == {"rollout_size": 2000}
     for bad in (0.0, -0.1, 1.01):
         with pytest.raises(ValueError, match="eps_decay_fraction"):
             DDQNConfig(eps_decay_fraction=bad)
@@ -409,10 +412,12 @@ def test_training_run_checks_a_sensitivity_run_against_an_existing_main_run(tmp_
     write_meta(run_meta_path("ppo", "balanced", 0, tmp_path), _meta("ppo", hp_changes={"vf_coef": 1.0}))
     with pytest.raises(ValueError, match="vf_coef"):
         tr._check_against_main_run(meta)
-    # runs outside the sensitivity role (here two overridden keys, a debug variant) are not checked
-    debug = resolve_setup("ppo", ["--set", "n_envs=2", "--set", "n_steps=10", "--set", "minibatch_size=10",
-                                  "--out-dir", str(tmp_path)])
+    # a debug run (budget overrides, three overridden keys) is not a sensitivity run and is not checked
+    debug_args = ["--set", "n_envs=2", "--set", "n_steps=10", "--set", "minibatch_size=10", "--out-dir", str(tmp_path)]
+    debug = resolve_setup("ppo", [*debug_args, "--total-steps", "1000", "--val-every", "500"])
     TrainingRun(debug, object, quiet=True)._check_against_main_run(_meta("ppo"))
+    with pytest.raises(ValueError, match="not a registered run"):  # the same variant with the frozen budget is refused
+        resolve_setup("ppo", debug_args)
 
 
 # ---- video episodes --------------------------------------------------------------------------------------------------------

@@ -58,6 +58,21 @@ def test_budget_and_target_values_are_frozen_and_no_longer_placeholders():
     check_target_performance(TARGET_PERFORMANCE, TARGET_CONSECUTIVE)
 
 
+def test_ppo_defaults_are_frozen_after_tuning():
+    """PPOConfig holds the configuration chosen by tuning (tune-nsteps500, docs/tuning_log.md), with no placeholder left."""
+    cfg = PPOConfig()
+    assert placeholders_in_use(cfg) == []
+    assert {k: getattr(cfg, k) for k in (
+        "lr", "gae_lambda", "clip_range", "n_envs", "n_steps", "n_epochs", "minibatch_size", "ent_coef", "vf_coef",
+        "max_grad_norm", "target_kl", "policy_loss")} == {
+        "lr": 3e-4, "gae_lambda": 0.95, "clip_range": 0.2, "n_envs": 4, "n_steps": 500, "n_epochs": 10,
+        "minibatch_size": 100, "ent_coef": 0.01, "vf_coef": 0.5, "max_grad_norm": 0.5, "target_kl": None,
+        "policy_loss": "clip"}
+    assert cfg.rollout_size == 2000
+    check_budget_matches_rollout(TrainBudget(), cfg.rollout_size)  # 2,000 divides 300,000 and 12,000
+    check_comparable(DDQNConfig(), cfg, TrainBudget())
+
+
 def test_the_strong_level_stays_out_of_reach_of_the_scripted_baselines():
     strong = {c["metric"]: c for c in TARGET_PERFORMANCE["strong"]}
     idle_crash, idle_speed, slower_speed = 0.60, 24.7564, 20.03  # baselines on VAL_SEEDS (docs/config_decisions.md)
@@ -275,6 +290,39 @@ def test_env_step_columns_are_pooled_over_machines_with_the_number_of_seeds_that
     # k = 3: the first of three consecutive points that hold; rises at 10 / 12 / 14 -> 132,000 / 156,000 / 180,000
     assert strong["n_seeds"] == 3 and strong["mean"] == pytest.approx(np.mean([132_000, 156_000, 180_000]))
     assert across[across["metric"] == "wall_s_to_strong"]["machine"].tolist() == ["pcA", "pcB"]
+
+
+def test_gradient_updates_and_samples_per_env_step_are_hardware_independent_and_algorithm_neutral():
+    def with_counts(machine, seed, n_updates, n_samples):
+        log, meta = _run(machine, seed, 1.0)
+        meta["timing"].update(n_updates=n_updates, n_gradient_samples=n_samples)
+        return log, meta
+
+    runs = {  # 300,000 env steps per run
+        ("ddqn", "balanced", "main", 0): with_counts("pcA", 0, 300_000, 300_000 * 64),  # 1 step per env step, batch 64
+        ("ddqn", "balanced", "main", 1): with_counts("pcA", 1, 150_000, 150_000 * 64),  # train_freq 2
+        ("ppo", "balanced", "main", 0): with_counts("pcB", 0, 30_000, 3_000_000),  # 300 rollouts x 100 steps of 100
+        ("ppo", "balanced", "main", 1): with_counts("pcB", 1, 27_000, 2_700_000),  # target-KL stopped some epochs
+        ("ppo", "balanced", "main", 2): with_counts("pcB", 2, 30_000, None),  # samples not recorded -> NaN, not 0
+    }
+    per_model = cost_per_model(runs).set_index(["algorithm", "train_seed"])
+    assert per_model.loc[("ddqn", 0), "gradient_updates_per_env_step"] == pytest.approx(1.0)
+    assert per_model.loc[("ddqn", 0), "samples_per_env_step"] == pytest.approx(64.0)
+    assert per_model.loc[("ddqn", 1), "gradient_updates_per_env_step"] == pytest.approx(0.5)
+    assert per_model.loc[("ppo", 0), "gradient_updates_per_env_step"] == pytest.approx(0.1)
+    assert per_model.loc[("ppo", 0), "samples_per_env_step"] == pytest.approx(10.0)  # = n_epochs
+    assert per_model.loc[("ppo", 1), "samples_per_env_step"] == pytest.approx(9.0)
+    assert math.isnan(per_model.loc[("ppo", 2), "samples_per_env_step"])
+    across = cost_across_seeds(cost_per_model(runs))
+    for metric in ("gradient_updates_per_env_step", "samples_per_env_step"):
+        rows = across[across["metric"] == metric]
+        assert set(rows["machine"]) == {ALL_MACHINES}, metric  # pooled: compared between DDQN and PPO
+    ppo_samples = across[(across["metric"] == "samples_per_env_step") & (across["algorithm"] == "ppo")].iloc[0]
+    assert ppo_samples["n_runs"] == 3 and ppo_samples["n_seeds"] == 2 and ppo_samples["mean"] == pytest.approx(9.5)
+    # a run_meta without the counters (e.g. written before they existed) gives NaN, never a crash
+    log, meta = _run("pcA", 0, 1.0)
+    old = cost_per_model({("ddqn", "balanced", "main", 0): (log, meta)}).iloc[0]
+    assert math.isnan(old["gradient_updates_per_env_step"]) and math.isnan(old["samples_per_env_step"])
 
 
 def test_runs_without_a_recorded_machine_are_grouped_as_unknown_not_pooled_with_others():

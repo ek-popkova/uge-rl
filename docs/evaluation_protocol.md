@@ -256,7 +256,11 @@ results/eval/baselines/<condition>.csv, summary.csv                  scripted ba
 so it can never overwrite a main run. The layout without the variant level was never used for a trained run and is not
 supported (`load_eval_episodes` raises if it finds one). Hyperparameter tuning runs are the variants `tune-<name>` (reward
 `balanced`, run seed `PILOT_RUN_SEED = 99`); `load_eval_episodes` and `per_model_table` exclude them by default, so they never
-reach a result table. Helpers in `common/paths.py`. `results/` is git-ignored.
+reach a result table. Supplementary runs are the variants `supp-<name>` of the pre-declared registry
+`common.train_config.SUPPLEMENTARY_RUNS`; a run with a supplementary reward preset (`common.config.SUPPLEMENTARY_REWARDS`) has that
+preset as `<reward>`. `load_eval_episodes` and `per_model_table` exclude them unless `include_supplementary=True`, so they never
+reach a DDQN vs PPO table. Every table carries a `role` column (`common.paths.variant_role`: `main`, `sensitivity`, `tuning`,
+`supplementary`). Helpers in `common/paths.py`. `results/` is git-ignored.
 
 ## 10. Fixed before training, not to be changed after seeing results
 
@@ -292,6 +296,16 @@ team agreement, and a change after the main grid has started is reported as a de
   main run in anything but its varied parameter. Relative values are resolved from the base config at expansion time; the
   absolute values are in the run's `run_meta.json` (`hyperparameters`, plus `resolved.eps_decay_steps` for the DDQN epsilon
   schedule). The 24 runs for the current placeholder bases are listed in `docs/config_decisions.md`.
+- **Supplementary runs** (outside the DDQN vs PPO comparison, reported separately): declared before training in
+  `common.train_config.SUPPLEMENTARY_RUNS` (name -> algorithm, exact overrides, rewards, seeds of `TRAIN_SEEDS`, purpose; validated
+  at import), run as `--variant supp-<name>` with the frozen budget and the training density. `check_run_roles` refuses a `supp-`
+  run that does not match its entry exactly, a `supp-` name that is not registered, and every other variant that is neither
+  `main`, a sensitivity point of `expand_sensitivity_grid()` nor `tune-*` (debug runs, whose total steps / validation settings differ from the frozen budget, excepted). The base point
+  is the main-grid run of the same algorithm, reward and seed; `check_supplementary_run` / `check_supplementary_runs` fail if
+  anything but the declared overrides differs. Supplementary reward presets (`SUPPLEMENTARY_REWARDS`, experiment (b); weights fixed
+  analytically before the runs) are usable by registered `supp-` runs only, never by main, tuning or sensitivity runs; their base
+  run is the `balanced` main run (the reward weights excepted) and their `return_own` is the return under their own preset
+  (`episode_return` in `val_log.csv`, recomputed from the components in the test tables). Entries: `docs/config_decisions.md`.
 - **Budget (frozen after the calibration):** `total_env_steps = 300,000`, `val_every_env_steps = 12,000` (25 validation points per
   learning curve), `val_n_episodes = 20` (all `VAL_SEEDS`), the same for DDQN and PPO, tuning and sensitivity runs. PPO updates in rollouts of
   `n_envs * n_steps` env steps, so this product must divide both 300,000 and 12,000 (any divisor of 12,000, e.g. 1,000, 2,000, 3,000,
@@ -317,16 +331,22 @@ Every training run (`common/training.py`, the same for DDQN and PPO) writes, wit
   vector env, 0 for DDQN) and every per-episode metric of section 5, computed by the same `EpisodeRecorder` as the test
   episodes (`episode_return` is the training reward, `return_env` the default reward). The leader / TTC part costs one
   neighbour search per step; it is on in training (measured overhead: `README.md`, Training).
-- `update_log.csv`: one row per `K` gradient-update calls (`update_idx` counts gradient updates, `updates_in_row` is
-  the number of updates in the row): `lr`, `loss`, `grad_norm` (before clipping), `grad_norm_max`, `update_time_s`; DDQN: `td_loss, q_mean, q_max, target_q_mean, epsilon,
-  buffer_size`; PPO: `policy_loss, value_loss, entropy, approx_kl, clip_fraction, explained_variance, n_epochs_done`
-  (early stop on KL). A column of the other algorithm is not allowed; a missing one is NaN. **Aggregation of the K calls
+- `update_log.csv`: one row per `K` `log_update` calls (`update_idx` counts gradient updates, i.e. optimizer steps, for both
+  algorithms; `updates_in_row` is the number of updates in the row. DDQN makes one call per gradient step; PPO one call per
+  rollout reporting all its minibatch steps, `n_epochs_done x rollout_size / minibatch_size`): `lr`, `loss`, `grad_norm` (before
+  clipping), `grad_norm_max`, `update_time_s`; DDQN: `td_loss, q_mean, q_max, target_q_mean, epsilon,
+  buffer_size`; PPO: `policy_loss, value_loss, entropy, approx_kl, clip_fraction, explained_variance, n_epochs_done, ratio_max,
+  kl_beta, kl_after_update` (`n_epochs_done`: early stop on KL; `ratio_max`: largest probability ratio of the update; `kl_beta`: PPO-KL
+  penalty coefficient after the update, NaN for PPO-Clip; `kl_after_update`: exact mean KL(pi_old || pi_new) over the rollout after
+  all epochs, for both losses). For PPO, `grad_norm` is the mean over the rollout's minibatch steps, so `grad_norm_max` equals
+  `grad_norm` in PPO rows (`ppo/README.md`). A column of the other algorithm is not allowed; a missing one is NaN. **Aggregation of the K calls
   of a row** (one rule per column, the same for both algorithms, defined in `UPDATE_AGG`; with K = 1 every rule returns the
-  single value): `max` for `q_max` (overestimation spikes must survive) and `grad_norm_max` (derived by the logger from
+  single value): `max` for `q_max` (overestimation spikes must survive), `ratio_max` (PPO: the largest ratio of the window) and `grad_norm_max` (derived by the logger from
   `grad_norm`: gradient spikes are the usual sign of instability); `sum` for `update_time_s`; `last` for the state variables
-  `lr`, `epsilon`, `buffer_size` (and `env_step`, `update_idx`, `wall_s`); `mean` for every other metric (`loss`,
+  `lr`, `epsilon`, `buffer_size`, `kl_beta` (and `env_step`, `update_idx`, `wall_s`); `mean` for every other metric (`loss`,
   `grad_norm`, `td_loss`, `q_mean`, `target_q_mean`, `policy_loss`, `value_loss`, `entropy`, `approx_kl`, `clip_fraction`,
-  `explained_variance`, `n_epochs_done`).
+  `explained_variance`, `n_epochs_done`, `kl_after_update`). NaN values are dropped before a rule is applied; a column with no
+  value in the window stays NaN.
 - `val_log.csv`: `val_idx`, `env_step`, `wall_s`, `train_wall_s` (wall time without validation), cumulative
   `cum_env_time_s`, `cum_update_time_s`, `cum_val_time_s`, `cum_checkpoint_time_s`, then the full `summarize_metrics`
   output and `return_<preset>` for every preset (section 7).
@@ -336,7 +356,8 @@ Every training run (`common/training.py`, the same for DDQN and PPO) writes, wit
   observation shape, `NEAR_MISS_TTC`, `REVERSAL_WINDOW`; git commit and dirty flag, library versions, OS, machine identifier (`hostname`), CPU model, logical
   cores, thread settings, device, `--workers`, `onedrive_path` (whether the project or the output directory lies inside a OneDrive folder); timestamps, wall time and its split into env / update / validation /
   checkpoint seconds, training steps/s without validation, the quiet benchmark steps/s measured before training, final env
-  step, episodes, updates, status (`running` / `finished` / `failed`, also on a crash or Ctrl-C), the number of trainable
+  step, episodes, gradient updates (`n_updates`) and per-sample gradient evaluations (`n_gradient_samples`, the sum of the
+  minibatch sizes of all gradient updates; None if the trainer did not report it), status (`running` / `finished` / `failed`, also on a crash or Ctrl-C), the number of trainable
   parameters and the inference time.
 
 **Inference time** (`common.benchmark.measure_inference`): milliseconds per `agent.act(obs, deterministic=True)` at batch
@@ -347,7 +368,10 @@ in parallel the benchmark is repeated on the saved checkpoints in a quiet proces
 between DDQN and PPO (they were trained on different machines, see below).
 
 **Computational cost.** The DDQN vs PPO comparison uses only hardware-independent metrics: (a) env steps to the `TARGET_PERFORMANCE`
-levels and to the plateau (section 7), (b) the number of gradient updates and (c) the parameter count. Everything measured in seconds
+levels and to the plateau (section 7), (b) the number of gradient updates and of samples processed by them, per env step
+(`gradient_updates_per_env_step` = `timing.n_updates / final_env_step`, `samples_per_env_step` = `timing.n_gradient_samples /
+final_env_step` in `common.aggregate.cost_per_model`; a gradient update is one optimizer step for both algorithms) and (c) the
+parameter count. Everything measured in seconds
 (`train_wall_s`, wall time to a target or plateau, steps/s, `update_time_s` and its split from `env_time_s`, inference time) depends on the
 machine and is NOT compared between DDQN and PPO, because the two algorithms were trained on different machines; these quantities are
 reported per machine, with the machine described (`cpu_model`, `logical_cores` from `run_meta.json`), and used only for within-algorithm

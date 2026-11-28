@@ -10,9 +10,9 @@ of the final checkpoint AND of an early milestone checkpoint (``milestone_<p>pct
         --reward balanced --condition main --from-eval-csv results/eval/ppo/balanced/main/seed0/main.csv \
         --outcome crashed --n 3 --out-dir results/videos
 
-Agent loading is a TODO: ``load_agent`` is a registry that raises NotImplementedError for ``ddqn`` / ``ppo``
-until the agents exist (the scripted baselines ``random``, ``idle``, ``slower``, ``faster`` work for testing
-the pipeline; ``--checkpoint`` is ignored for them).
+Agent loading: ``load_agent`` is a registry. ``ppo`` loads ``final.pt`` / milestone checkpoints with ``PPOAgent.load``;
+``ddqn`` raises NotImplementedError until the DDQN agent exists (the scripted baselines ``random``, ``idle``,
+``slower``, ``faster`` work for testing the pipeline; ``--checkpoint`` is ignored for them).
 """
 
 from __future__ import annotations
@@ -33,8 +33,11 @@ def _load_ddqn(checkpoint: str) -> Agent:
 
 
 def _load_ppo(checkpoint: str) -> Agent:
-    # TODO: from ppo.agent import PPOAgent; agent = PPOAgent(...); agent.load(checkpoint); return agent
-    raise NotImplementedError("TODO: load a trained PPO agent from a checkpoint")
+    from ppo.agent import PPOAgent
+
+    agent = PPOAgent()  # the network spec is read from the checkpoint by load()
+    agent.load(checkpoint)
+    return agent
 
 
 AGENT_LOADERS: dict[str, Callable[[str], Agent]] = {"ddqn": _load_ddqn, "ppo": _load_ppo}

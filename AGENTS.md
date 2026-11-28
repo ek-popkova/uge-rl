@@ -101,7 +101,7 @@ The scripts in `scripts/pilot/` were left unfixed on purpose because that run ha
 
 ## Experiment tracking
 
-Infrastructure for DDQN and PPO is in place and the algorithms are still stubs. A training run is
+Infrastructure for DDQN and PPO is in place; PPO is implemented (`ppo/`) and tuned (defaults frozen, `docs/tuning_log.md`), DDQN is still a stub. A training run is
 `common.training.TrainingRun` + an algorithm `Trainer` (`ddqn/train.py`, `ppo/train.py`); the harness
 writes every number needed for the report, identically for both algorithms. Details: `README.md`
 (Training), `docs/evaluation_protocol.md` (sections 5, 7, 9, 11).
@@ -156,7 +156,15 @@ Rules:
   their base point is the main-grid run, guarded by `check_sensitivity_run`. Tuning runs are `--variant tune-<name>
   --seed 99` (`PILOT_RUN_SEED`; reward `balanced`; algorithm-specific keys only; default budget): `load_eval_episodes` and
   `per_model_table` exclude them, the harness refuses seed 99 outside `tune-*`; selection with
-  `common.aggregate.select_tuning_config`, log in `docs/tuning_log.md`.
+  `common.aggregate.select_tuning_config`, log in `docs/tuning_log.md`. Supplementary runs (PPO-KL, A2C-like, later a stronger
+  exploration; experiment (b) rewards) are `--variant supp-<name>` and must be declared BEFORE training in
+  `common.train_config.SUPPLEMENTARY_RUNS` (algorithm, exact overrides, rewards, seeds; `expand_supplementary_runs()` gives the
+  CLI); supplementary reward presets live in `common.config.SUPPLEMENTARY_REWARDS` and only a registered `supp-` run may use
+  them. Both stay out of every DDQN vs PPO table (`load_eval_episodes` / `per_model_table` drop them unless
+  `include_supplementary`); base-run check `check_supplementary_run(s)`. **Every run has exactly one role**
+  (`check_run_roles`): `main`, a sensitivity point of `expand_sensitivity_grid()`, `tune-*` or a registered `supp-*`; any
+  other variant is refused unless its total steps, validation interval or validation episodes differ from the frozen
+  `TrainBudget` (debug runs, never results, separate `--out-dir`; passing the frozen values explicitly does not count).
 
 ### Decided (shared by DDQN and PPO)
 
@@ -169,6 +177,7 @@ Frozen by the team; `common/train_config.py`, `common/networks.py`, `common/conf
 | network | MLP `hidden_sizes = (256, 256)`, `activation = "relu"`, input = 5x5 Kinematics flattened to 25 features (`obs_flatten`), no extra normalization; built by `common.networks.build_mlp`; weight initialization is algorithm-specific |
 | same size | DDQN Q-network = PPO actor; the PPO critic is an extra network of the same size, separate from the actor (`ppo_shared_trunk = False`); `check_comparable` checks gamma, `hidden_sizes`, `activation` |
 | tuning | at most 4 configurations per algorithm (defaults + up to 3), algorithm-specific keys only; `PILOT_RUN_SEED = 99`, reward `balanced`, density `medium`, `VAL_SEEDS` only, variant `tune-<name>`; criterion = mean `return_balanced` over the last 3 validation points, ties by lower `crash_rate` |
+| supplementary runs | pre-declared registry `SUPPLEMENTARY_RUNS` (`common/train_config.py`), variant `supp-<name>`, frozen budget, training density, seeds from `TRAIN_SEEDS`; decided entries (PPO only): `supp-ppo-kl` (`policy_loss=kl`) and `supp-a2c` (`n_epochs=1`, `minibatch_size` = rollout size), reward `balanced`, seeds 0-2 (6 runs); the stronger-exploration entry (all 4 rewards x seeds 0-4) is added after tuning; supplementary reward presets (`SUPPLEMENTARY_REWARDS`, experiment (b)) have no entry yet. Never in a DDQN vs PPO table; the registry works for DDQN, which has no entry |
 | sensitivity | reward `balanced`, density `medium`, main-grid `total_env_steps`, seeds `[0, 1, 2]`, one parameter at a time, every grid RELATIVE to the base value (base is in the grid by construction): lr base x1/3, x1, x3 (both); DDQN `eps_decay_fraction` base -0.2, base, base +0.2; PPO `clip_range` base -0.1, base, base +0.1 (a value outside (0, 1] / (0, 1) raises, never clipped: eps base in (0.2, 0.8], clip base in (0.1, 0.9)); base value = main-grid run (not re-run); 12 runs per algorithm, 24 in total. DDQN decays epsilon over `eps_decay_fraction` x `total_env_steps` (resolved to steps at run start, stored in `run_meta.json` `resolved`) |
 | budget (frozen after the SB3 calibration) | `total_env_steps = 300,000`, `val_every_env_steps = 12,000` (25 validation points), `val_n_episodes = 20` (all `VAL_SEEDS`); both step values must be multiples of the PPO rollout size `n_envs * n_steps` (`check_budget_matches_rollout`, `check_comparable(..., budget)`, checked by `resolve_setup` and at `TrainingRun` start); tuning and sensitivity runs use the same budget |
 | targets (frozen after the calibration) | `TARGET_PERFORMANCE["strong"]` = `crash_rate <= 0.4` and `mean_speed >= 25.5`; `TARGET_CONSECUTIVE = 3` for BOTH levels (`beats_idle` and `strong`); every run trains for the full budget, there is no early stopping |
@@ -184,15 +193,15 @@ No shared item is left: the budget and the target values were frozen after the S
 unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit
 of `common/config.py`.
 
-Only the algorithm-specific hyperparameters below remain. They are still PLACEHOLDERs (`# PLACEHOLDER: decide before training`):
+Only the DDQN algorithm-specific hyperparameters below remain. They are still PLACEHOLDERs (`# PLACEHOLDER: decide before training`):
 a conventional value that only keeps the code runnable, not a tuned one. The harness prints `placeholders_in_use` at start and
-stores it in `run_meta.json`. Each owner chooses them during tuning within the tuning budget above and then replaces `_ph(...)`
-by a plain default in `common/train_config.py`:
+stores it in `run_meta.json`. The owner chooses them during tuning within the tuning budget above and then replaces `_ph(...)`
+by a plain default in `common/train_config.py`. The PPO values are decided (tuning finished, row below):
 
 | Item | Where | What it affects |
 |---|---|---|
 | DDQN: `lr, buffer_size, batch_size, learning_starts, train_freq, gradient_steps, target_update_interval, tau, eps_start, eps_end, eps_decay_fraction (0.3), max_grad_norm` | `DDQNConfig` | final performance and stability. `lr` and `eps_decay_fraction` are the bases of their sensitivity grids (eps base must stay in (0.2, 0.8]) |
-| PPO: `lr, gae_lambda, clip_range, n_envs, n_steps, n_epochs, minibatch_size, ent_coef, vf_coef, max_grad_norm, target_kl` | `PPOConfig` | same; `n_envs * n_steps` is the rollout size and the step granularity and **must divide both 300,000 and 12,000** (`total_env_steps` and `val_every_env_steps`; any divisor of 12,000, for example 1,000, 2,000, 3,000, 4,000, 6,000, 12,000), otherwise PPO overshoots the budget or validates at shifted steps; `check_budget_matches_rollout` raises and names the nearest valid values, so keep this in mind when choosing `n_envs` and `n_steps` during tuning. `lr` and `clip_range` are the bases of their sensitivity grids (clip base must stay in (0.1, 0.9)) |
+| PPO: **DECIDED by tuning** (`docs/tuning_log.md`, chosen `tune-nsteps500`; no PPO placeholder left, pinned by `tests/test_frozen_values.py::test_ppo_defaults_are_frozen_after_tuning`): `lr = 3e-4`, `gae_lambda = 0.95`, `clip_range = 0.2`, `n_envs = 4`, `n_steps = 500` (rollout 2,000), `n_epochs = 10`, `minibatch_size = 100`, `ent_coef = 0.01`, `vf_coef = 0.5`, `max_grad_norm = 0.5`, `target_kl = None`; also decided: `policy_loss = "clip"` (`"kl"` for the PPO-KL variant), `kl_target = 0.01`, `kl_beta_init = 1.0` | `PPOConfig` | frozen like the shared decisions: a change is reported as a deviation. The rollout `n_envs * n_steps` = 2,000 divides 300,000 and 12,000 (`check_budget_matches_rollout`). `lr` 3e-4 and `clip_range` 0.2 are the bases of their sensitivity grids (PPO: lr 1e-4 / 9e-4, clip 0.1 / 0.3); `supp-a2c` resolves `minibatch_size` to 2,000. All four tuning configurations drove at about 21 m/s with 0 crashes and reached neither target level |
 
 Runtime implication. Aggregate throughput here is about 140 env steps/s with 8-12 processes (80-180 depending on
 the session, `docs/performance_analysis.md` C5, C8), so every 1 M simulated steps cost about 2 h. One
@@ -200,7 +209,8 @@ model costs `T + n_val x val_n_episodes x 30` simulated steps, with `n_val = T /
 With the frozen budget (T = 300,000, 25 validations x 20 episodes x 30 steps = 15,000 steps) that is 315,000
 steps; the 40 main-grid models are 12.6 M steps and the 24 sensitivity runs 7.6 M, so the 64 runs are 20.2 M steps: about 39 h on
 one machine at the 143 steps/s measured in the calibration (61 h at 92), about 20 h per machine on two (each machine: the 32 runs of one algorithm, 10.1 M steps, at most 8 busy processes). Tuning adds at most
-8 runs (4 per algorithm, one algorithm per machine) at the same budget, 2.5 M steps, about 5 h in total. These figures use the SB3 speed of the calibration and ignore
+8 runs (4 per algorithm, one algorithm per machine) at the same budget, 2.5 M steps, about 5 h in total. The 6 registered supplementary
+runs (PPO machine) add 1.9 M steps, about 3.7 h; the stronger-exploration entry (20 runs) would add 6.3 M steps, about 12 h. These figures use the SB3 speed of the calibration and ignore
 network updates and the `EpisodeRecorder` overhead (measured: see `README.md`, Training); our implementations may be faster or
 slower than SB3, so re-estimate after tuning. `TrainingRun` prints its own simulation-only estimate from a quiet benchmark before
 starting and refuses above `--max-minutes` (default 45) without `--force`: a 300,000-step run is estimated at hours, so main-grid,
@@ -256,19 +266,23 @@ When:
 Still to add when the algorithms are implemented (each needs the real `DDQNTrainer` / `PPOTrainer`):
 
 - [ ] Time-limit handling, for DDQN and PPO: bootstrap from `s'` when `truncated`, value 0 only when `terminated`; test both
-  cases on hand-built transitions (`docs/evaluation_protocol.md` section 1).
+  cases on hand-built transitions (`docs/evaluation_protocol.md` section 1). PPO: done (`tests/test_ppo_core.py`, GAE tests;
+  `tests/test_ppo.py`, `final_obs` on the real vector env); DDQN: open.
 - [ ] Double DQN target `r + gamma * Q_target(s', argmax_a Q_online(s', a))` on a hand-computed example, and that it differs from
   the vanilla DQN max target `r + gamma * max_a Q_target(s', a)`; the target network updates on schedule (`target_update_interval`,
   `tau`); epsilon follows its schedule; a hand-built batch gives the expected TD loss.
-- [ ] GAE on a short hand-computed trajectory, including a truncation in the middle of the rollout (bootstrap from `final_obs`,
-  the GAE recursion is cut there) and a terminal state (no bootstrap).
-- [ ] PPO clipped objective on a toy case (ratios inside and outside the clip range, both advantage signs), the `approx_kl` /
-  `clip_fraction` definitions, and the KL early stop (`n_epochs_done < n_epochs` when `approx_kl` exceeds `target_kl`).
+- [x] GAE on a short hand-computed trajectory, including a truncation in the middle of the rollout (bootstrap from `final_obs`,
+  the GAE recursion is cut there) and a terminal state (no bootstrap). Done: `tests/test_ppo_core.py`.
+- [x] PPO clipped objective on a toy case (ratios inside and outside the clip range, both advantage signs), the `approx_kl` /
+  `clip_fraction` definitions, and the KL early stop (`n_epochs_done < n_epochs` when `approx_kl` exceeds `target_kl`). Done:
+  `tests/test_ppo_core.py`, `tests/test_ppo.py`.
 - [ ] `save` / `load` round trip gives identical actions for a fixed observation batch; `act(obs, deterministic=True)` is
   deterministic; parameter count equals `n_parameters()` (DDQN: 73,733 = `build_action_network`; PPO: actor 73,733 + critic 72,705,
-  both from `common.networks`); `hidden_sizes` equal for both algorithms (`check_comparable`).
+  both from `common.networks`); `hidden_sizes` equal for both algorithms (`check_comparable`). PPO: done (`tests/test_ppo.py`);
+  DDQN: open.
 - [ ] The real trainers pass the same harness tests as `RandomTrainer` (files, schemas, resume equals an uninterrupted run,
   monotonic `env_step`, `--workers 1` equals `--workers 2`: parametrize the existing harness tests over the trainer class), and a run
-  is reproducible for a fixed seed.
+  is reproducible for a fixed seed. PPO: done (`tests/test_training.py`, run key `ppo_trainer`); DDQN: open.
 - [ ] `make_eval_agent()` returns a light, picklable `Agent` (no replay or rollout buffer) that `validate()` can send to worker
   processes; `load_agent` in `scripts/record_video.py` loads both agents from `final.pt` and from a milestone checkpoint.
+  PPO: done (`tests/test_ppo.py`, `tests/test_training.py`); DDQN: open.

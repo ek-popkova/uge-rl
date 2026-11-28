@@ -115,7 +115,7 @@ Each level is joint and must stay unreachable for the scripted baselines: `slowe
 crash bound alone would reward braking; `idle` crashes in 71% of the episodes at 24.7 m/s (`docs/evaluation_protocol.md`
 section 8). On `VAL_SEEDS` the baselines have crash rate / mean speed: random 0.70 / 24.24, idle 0.60 / 24.76, slower 0.00 / 20.03,
 faster 1.00 / 28.90 m/s; `tests/test_training.py::test_no_scripted_baseline_meets_target_performance` checks both levels. The
-budget (`total_env_steps`, validation interval and episodes) is frozen as well (below); only the algorithm-specific hyperparameters (`common/train_config.py`) are placeholders.
+budget (`total_env_steps`, validation interval and episodes) is frozen as well (below); only the DDQN algorithm-specific hyperparameters (`common/train_config.py`) are still placeholders (the PPO ones were decided by tuning, "PPO hyperparameters decided by tuning" below).
 
 ## Shared training decisions
 
@@ -123,7 +123,7 @@ Agreed by the team and identical for DDQN and PPO; code: `common/train_config.py
 (tuning and sensitivity constants), `common/aggregate.py`. **These may only change by team agreement. A change after the main
 grid has started is reported as a deviation** (`docs/evaluation_protocol.md` section 10). The budget and the target values were frozen after
 the SB3 calibration (next section); no shared item is open any more. Everything else that is still a placeholder
-(`CLAUDE.md`, "TO DECIDE BEFORE TRAINING") is an algorithm-specific hyperparameter and stays with its owner.
+(`CLAUDE.md`, "TO DECIDE BEFORE TRAINING") is an algorithm-specific hyperparameter and stays with its owner; after tuning only DDQN's are left.
 
 | Decision | Value | Justification |
 |---|---|---|
@@ -135,6 +135,7 @@ the SB3 calibration (next section); no shared item is open any more. Everything 
 | tuning budget | at most 4 configurations per algorithm (the defaults + up to 3 variations), only algorithm-specific hyperparameters varied (never the shared values above, the budget or the validation settings); one run per configuration with the pilot run seed `PILOT_RUN_SEED = 99`, reward `balanced`, density `medium`, validation on `VAL_SEEDS` only | equal for both algorithms, so the comparison is not "who tuned more"; seed 99 is disjoint from every seed set and its derived vector-env seeds collide with none (tested) |
 | selection criterion | mean `return_balanced` over the last 3 validation points; ties (within 1e-9) broken by the lower `crash_rate` over the same points, then the first listed (the defaults); `common.aggregate.select_tuning_config` | fixed before any tuning; a mean over 3 points damps the noise of a single 20-episode validation |
 | tuning runs | variant `tune-<name>` (`runs/<algo>/balanced/tune-<name>/seed99/`); `load_eval_episodes` and `per_model_table` exclude them by default; the harness refuses a `tune-*` run with another seed / reward / density, a shared key or a budget override, and refuses seed 99 outside `tune-*` | they never mix with the main grid or the sensitivity runs. Log: `docs/tuning_log.md` |
+| supplementary runs | pre-declared registry `SUPPLEMENTARY_RUNS` (`common/train_config.py`), variant `supp-<name>` (`runs/<algo>/<reward>/supp-<name>/seed<s>/`), frozen budget, training density, seeds of `TRAIN_SEEDS`; supplementary reward presets in `common.config.SUPPLEMENTARY_REWARDS`, usable by registered `supp-` runs only; `check_run_roles` refuses every unregistered variant (debug runs, whose total steps / validation settings differ from the frozen budget, excepted); excluded from every DDQN vs PPO table (`include_supplementary=False`) | declared before training like the sensitivity grid, so no extra run can be added after seeing results without showing up as a registry change; a variant name always tells the role. Entries: "Supplementary runs" below |
 | sensitivity framework | reward `balanced`, density `medium`, the same `total_env_steps` as the main grid, `SENSITIVITY_SEEDS = [0, 1, 2]`, one parameter varied at a time, the others at their frozen base values | one-at-a-time around frozen values is the cheapest design that shows which hyperparameter matters |
 | sensitivity grid (`SENSITIVITY_GRID`), **relative to the base value** | learning rate: base x1/3, x1, x3 (both algorithms); DDQN `eps_decay_fraction`: base -0.2, base, base +0.2; PPO `clip_range`: base -0.1, base, base +0.1. `gamma` is not varied (>= 0.99 is required, little effect on 30-step episodes) | the base is in the grid by construction, so the grid follows whatever base the owner chooses and whatever `total_env_steps` the team decides. A value outside its valid range (`eps_decay_fraction` in (0, 1], `clip_range` in (0, 1)) raises instead of being clipped: the `eps_decay_fraction` base must lie in (0.2, 0.8], the `clip_range` base in (0.1, 0.9). 4 non-base settings x 3 seeds = 12 runs per algorithm, 24 in total (`expand_sensitivity_grid`) |
 | DDQN epsilon decay | `eps_decay_fraction` (placeholder base 0.3) of `total_env_steps`, linear from `eps_start` to `eps_end` | a fraction instead of absolute steps, so the schedule and its sensitivity grid follow the budget. Resolved to `eps_decay_steps = round(fraction x total_env_steps)` at run start (`DDQNConfig.eps_decay_steps`) and stored in `run_meta.json` under `resolved` (PPO: `rollout_size`) |
@@ -143,10 +144,11 @@ the SB3 calibration (next section); no shared item is open any more. Everything 
 | video episodes | candidate `TEST_SEEDS` episodes shared by both algorithms, from the final models' `main` test results (`common.failure_cases.video_episode_seeds`): both crashed, both completed and the two disagreement cases (only DDQN / only PPO crashed); the report video uses training seed 0 of each reward only (rule in `docs/evaluation_protocol.md` section 11) | identical starting situations make the two algorithms (and early / middle / final checkpoints) directly comparable; one training seed keeps the video short |
 | engineering settings (no effect on results) | `checkpoint_every_env_steps = 10,000`; `update_log_every` K = 100 for DDQN, 1 for PPO | checkpoint: about 10 min of wall time at the measured speed, assuming 12-17 env steps/s per process with 8-12 runs in parallel (aggregate 140 steps/s, PA C5), network updates make it a bit slower; at most this much work is lost after a crash. K only sets the size of `update_log.csv` |
 
-### Sensitivity runs for the current placeholder bases
+### Sensitivity runs for the current bases
 
-The absolute values depend on the base values and on `total_env_steps` (here the placeholder bases DDQN lr 5e-4,
-`eps_decay_fraction` 0.3, PPO lr 3e-4, `clip_range` 0.2, and the frozen `total_env_steps` 300,000); `expand_sensitivity_grid()` recomputes them
+The absolute values depend on the base values and on `total_env_steps` (here the DDQN placeholder bases lr 5e-4,
+`eps_decay_fraction` 0.3, the PPO bases decided by tuning lr 3e-4, `clip_range` 0.2, and the frozen `total_env_steps` 300,000; the PPO rows are
+final, the DDQN rows change if tuning changes the DDQN bases); `expand_sensitivity_grid()` recomputes them
 and `resolve_hyperparameters` resolves `eps_decay_fraction` to env steps (the base 0.3 is 90,000 steps; tested in `tests/test_frozen_values.py`). Every
 setting runs with seeds 0, 1, 2 (reward `balanced`, density `medium`), 3 runs per setting; the base setting is the main-grid run.
 
@@ -161,6 +163,26 @@ setting runs with seeds 0, 1, 2 (reward `balanced`, density `medium`), 3 runs pe
 | PPO | `clip_range` | base -0.1 | 0.1 | `clip_range=0.1` | 3 |
 | PPO | `clip_range` | base +0.1 | 0.3 | `clip_range=0.3` | 3 |
 | | | | | **total** | **24** |
+
+### Supplementary runs (registry, decided 2026-11-27)
+
+Outside the DDQN vs PPO comparison; reported separately. `common.train_config.SUPPLEMENTARY_RUNS` is the source; adding an entry is
+one line there (validated at import: algorithm-specific keys only, a valid config whose rollout fits the budget, values different from
+the base, rewards of `REWARDS` / `SUPPLEMENTARY_REWARDS`, seeds of `TRAIN_SEEDS`, not a sensitivity point). `FromBase("rollout_size")`
+takes the value from the base config, so the entry follows the PPO defaults chosen after tuning. Base point: the main-grid run with the
+same algorithm, reward and seed.
+
+| Variant | Algorithm | Overrides | Rewards | Seeds | Runs | Purpose |
+|---|---|---|---|---|---:|---|
+| `supp-ppo-kl` | PPO | `policy_loss = "kl"` (`kl_target`, `kl_beta_init` as decided below) | `balanced` | 0, 1, 2 | 3 | PPO-KL vs PPO-Clip (report section 3.3) |
+| `supp-a2c` | PPO | `n_epochs = 1`, `minibatch_size = n_envs * n_steps` (`FromBase`; 2,000 with the tuned defaults) | `balanced` | 0, 1, 2 | 3 | A2C-like: one full-batch gradient step per rollout at ratio 1 |
+| (after tuning) `supp-ent-<value>` | PPO | `ent_coef = <value>` | all 4 `REWARDS` | 0-4 | 20 | stronger exploration; added once its `ent_coef` is known |
+| | | | | | **6 (+20)** | |
+
+Supplementary reward presets (`common.config.SUPPLEMENTARY_REWARDS`, experiment (b)): no entry yet; the weights are fixed analytically
+before the runs (`indifference_point`; the ordering G_crash < G_slow < G_succ must hold, checked at import). A run with one needs a
+registry entry that lists the preset; its base run is the `balanced` main run (reward weights excepted). DDQN: the registry works for it,
+no entry. Cost: 6 runs x 315,000 = 1.9 M simulated steps, about 3.7 h on the PPO machine at 143 steps/s.
 
 ## Values frozen after the calibration
 
@@ -192,7 +214,38 @@ valid budget values and the nearest valid rollout sizes; it is called by `check_
 and at the start of `TrainingRun.run`. Since 300,000 = 25 x 12,000, the rule is: **`n_envs * n_steps` must be a divisor of 12,000**, e.g. 1,000,
 2,000, 3,000, 4,000, 6,000 or 12,000 (the SB3 calibration used 2,048, which would be refused). DDQN advances one transition at a time and
 has no such constraint. Debug and test budgets (explicit `--total-steps` ... overrides, never used for results) only need a `total_env_steps` that
-fits; they may validate at the next rollout boundary.
+fits; they may validate at the next rollout boundary. `minibatch_size` must in turn divide `n_envs * n_steps` (`PPOConfig` raises), so
+every minibatch has the same size.
+
+### PPO-KL settings (PPO only, decided, not tuned)
+
+Algorithm-specific values of `PPOConfig` that are decided rather than placeholders (owner: PPO; `common/train_config.py`). They are not
+tuned and are not part of the sensitivity grid.
+
+| Setting | Value | Justification |
+|---|---|---|
+| `policy_loss` | `"clip"` (PPO-Clip, report `eq:ppo-clip`) for the main grid, tuning and sensitivity runs; `"kl"` (adaptive KL penalty) only for the supplementary run `supp-ppo-kl` | PPO-Clip is the variant the assignment and the literature treat as standard PPO; PPO-KL is the alternative trust-region mechanism of the same paper, run as a separate variant (report section 3.3) |
+| `kl_target` (d_targ) | 0.01 | the middle value of the three tried in the PPO paper (Schulman et al. 2017, Table 1: 0.003, 0.01, 0.03; adaptive KL scored 0.68, 0.74, 0.71) |
+| `kl_beta_init` | 1.0 | the PPO paper's initial value ("beta was initialized at 1", Table 1 caption); the paper notes the initial value "is not important in practice because the algorithm quickly adjusts it" (section 4) |
+
+### PPO hyperparameters decided by tuning (2026-11-28)
+
+PPO tuning is finished (4 of 4 configurations, seed 99, reward `balanced`, commit `9685a02`; table and notes in `docs/tuning_log.md`).
+`select_tuning_config` chose `nsteps500`, i.e. the former defaults with `n_steps = 500`. Its whole hyperparameter set (from the run's
+`run_meta.json`) is now the plain default of `PPOConfig` (owner: PPO; `common/train_config.py`), with no PPO placeholder left; pinned by
+`tests/test_frozen_values.py::test_ppo_defaults_are_frozen_after_tuning`. These values are frozen for the main grid, the sensitivity runs and
+the supplementary runs; a change is reported as a deviation.
+
+| Setting | Value | How it was decided |
+|---|---|---|
+| `n_steps` | 500 (rollout `n_envs * n_steps` = 2,000, divides 300,000 and 12,000) | varied in tuning: 250 (criterion 3.82), 500 (4.86, chosen), 1,000 (4.06) |
+| `ent_coef` | 0.01 | varied in tuning: 0.05 (3.93) was not chosen |
+| `lr` | 3e-4 | tuning default, not varied; base of the lr sensitivity grid (1e-4 / 9e-4) |
+| `clip_range` | 0.2 | tuning default, not varied; base of the clip sensitivity grid (0.1 / 0.3) |
+| `gae_lambda`, `n_envs`, `n_epochs`, `minibatch_size`, `vf_coef`, `max_grad_norm`, `target_kl` | 0.95, 4, 10, 100, 0.5, 0.5, None | tuning defaults, not varied |
+
+Every tuning configuration drove at about 21 m/s with 0 crashes and reached neither `TARGET_PERFORMANCE` level, so the frozen defaults are
+the best of four slow-safe policies, not a policy that drives fast. Report this as a limitation of the 4-configuration tuning budget.
 
 ### Post-hoc plateau metric
 

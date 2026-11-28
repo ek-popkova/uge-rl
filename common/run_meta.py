@@ -78,13 +78,13 @@ def check_action_mapping(env: Any) -> dict[str, int]:
 
 def describe_env(env: Any, env_id: str, reward_name: str) -> dict[str, Any]:
     """The env facts stored in run_meta: the resolved config actually used, not only BASE_CONFIG."""
-    from common.config import REWARDS
+    from common.config import reward_weights
 
     return {
         "env_id": env_id,
         "config": jsonable(dict(env.unwrapped.config)),
         "reward": reward_name,
-        "reward_weights": dict(REWARDS[reward_name]),
+        "reward_weights": reward_weights(reward_name),
         "action_index": check_action_mapping(env),
         "observation_shape": list(env.observation_space.shape),
         "near_miss_ttc": NEAR_MISS_TTC,
@@ -222,7 +222,8 @@ def new_meta(identity: dict[str, Any]) -> dict[str, Any]:
             "quiet_benchmark_steps_per_s": None,  # one process, before training (CLAUDE.md rule 1)
             "final_env_step": 0,
             "n_episodes": 0,
-            "n_updates": 0,
+            "n_updates": 0,  # gradient updates (optimizer steps), the same unit for DDQN and PPO
+            "n_gradient_samples": None,  # per-sample gradient evaluations (sum of minibatch sizes); None = not reported
             "n_val_points": 0,
         },
         "model": {"n_parameters": None},

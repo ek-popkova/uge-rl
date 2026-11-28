@@ -18,7 +18,7 @@ import gymnasium as gym
 import pandas as pd
 
 from common.agent_base import Agent
-from common.config import REWARDS, TEST_CONDITIONS, TEST_SEEDS, VAL_SEEDS
+from common.config import TEST_CONDITIONS, TEST_SEEDS, VAL_SEEDS, reward_weights
 from common.envs import make_test_env
 from common.metrics import EpisodeRecorder, add_return_columns, summarize_metrics
 from common.parallel import limit_threads, run_tasks
@@ -108,8 +108,7 @@ def evaluate(
     """
     if condition not in TEST_CONDITIONS:
         raise ValueError(f"Unknown test condition {condition!r}; choose from {list(TEST_CONDITIONS)}")
-    if reward not in REWARDS:
-        raise ValueError(f"Unknown reward {reward!r}; choose from {list(REWARDS)}")
+    reward_weights(reward)  # REWARDS or SUPPLEMENTARY_REWARDS; raises on an unknown name
     seeds = list(TEST_SEEDS if seeds is None else seeds)
     if len(set(seeds)) != len(seeds):
         raise ValueError("seeds must be unique")

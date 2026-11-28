@@ -8,7 +8,7 @@ from typing import Any, Mapping, Optional
 import gymnasium as gym
 import highway_env  # noqa: F401  (registers the highway environments)
 
-from common.config import BASE_CONFIG, DENSITIES, ENV_ID, REWARDS, TEST_CONDITIONS, TRAIN_DENSITY
+from common.config import BASE_CONFIG, DENSITIES, ENV_ID, TEST_CONDITIONS, TRAIN_DENSITY, reward_weights
 from common.rewards import CustomRewardWrapper
 
 
@@ -28,7 +28,8 @@ def make_env(
 
     Args:
         density: Traffic density preset, one of ``common.config.DENSITIES``.
-        reward: Reward preset, one of ``common.config.REWARDS``.
+        reward: Reward preset, one of ``common.config.REWARDS`` or ``SUPPLEMENTARY_REWARDS`` (registered supplementary
+            runs only, enforced by ``common.train_config.check_run_roles``).
         seed: Seed used to reset the environment once after creation.
             ``None`` leaves seeding to the caller.
         render_mode: Gymnasium render mode (e.g. ``"rgb_array"``) or None.
@@ -41,15 +42,14 @@ def make_env(
     """
     if density not in DENSITIES:
         raise ValueError(f"Unknown density {density!r}; choose from {list(DENSITIES)}")
-    if reward not in REWARDS:
-        raise ValueError(f"Unknown reward {reward!r}; choose from {list(REWARDS)}")
+    weights = reward_weights(reward)  # REWARDS or SUPPLEMENTARY_REWARDS; raises on an unknown name
 
     config = copy.deepcopy(BASE_CONFIG)
     config.update(DENSITIES[density])
     config.update(copy.deepcopy(dict(overrides or {})))
 
     env = gym.make(env_id, config=config, render_mode=render_mode)
-    env = CustomRewardWrapper(env, REWARDS[reward])
+    env = CustomRewardWrapper(env, weights)
     if seed is not None:
         env.reset(seed=seed)
     return env

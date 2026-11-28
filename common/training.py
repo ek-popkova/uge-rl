@@ -58,12 +58,12 @@ from common.config import (  # noqa: E402
     BASE_CONFIG,
     DENSITIES,
     ENV_ID,
-    REWARDS,
     SENSITIVITY_DENSITY,
     SENSITIVITY_REWARD,
     SENSITIVITY_SEEDS,
     TRAIN_DENSITY,
     TRAIN_SEEDS,
+    all_reward_names,
 )
 from common.evaluate import validate  # noqa: E402
 from common.paths import (  # noqa: E402
@@ -71,10 +71,12 @@ from common.paths import (  # noqa: E402
     RESULTS_DIR,
     check_variant,
     final_checkpoint,
+    is_supplementary_variant,
     milestone_checkpoint,
     resume_checkpoint,
     run_dir,
     run_meta_path,
+    variant_role,
 )
 from common.run_meta import describe_env, new_meta, read_meta, reproducibility_info, utc_now, write_meta  # noqa: E402
 from common.seeding import derived_env_seeds, set_global_seeds  # noqa: E402
@@ -86,9 +88,12 @@ from common.train_config import (  # noqa: E402
     check_budget_matches_rollout,
     check_run_roles,
     check_sensitivity_run,
+    check_supplementary_run,
+    effective_budget_overrides,
     parse_set_args,
     placeholders_in_use,
     resolve_hyperparameters,
+    supplementary_base_reward,
     variant_name,
 )
 from common.train_env import finished_episodes, make_train_env, make_vector_env  # noqa: E402
@@ -158,9 +163,14 @@ class TrainContext:
             self.logger.log_episode(self.env_step, env_index, record)
         return obs, reward, terminated, truncated, info
 
-    def log_update(self, n_updates: int = 1, **metrics: float) -> None:
-        """Report gradient update(s); see ``common.train_logging.UPDATE_LOG_COLUMNS`` for the metric names."""
-        self.logger.log_update(self.env_step, n_updates=n_updates, **metrics)
+    def log_update(self, n_updates: int = 1, n_samples: Optional[int] = None, **metrics: float) -> None:
+        """Report gradient update(s); see ``common.train_logging.UPDATE_LOG_COLUMNS`` for the metric names.
+
+        ``n_updates``: optimizer steps since the last call (the unit compared between the algorithms).
+        ``n_samples``: per-sample gradient evaluations of those steps (sum of their minibatch sizes); report it in
+        every call, otherwise ``run_meta.json`` ``timing.n_gradient_samples`` is None.
+        """
+        self.logger.log_update(self.env_step, n_updates=n_updates, n_samples=n_samples, **metrics)
 
     # -- resume -------------------------------------------------------------------------------
     def get_env_states(self) -> list[bytes]:
@@ -217,10 +227,13 @@ class Trainer(ABC):
 # ---------------------------------------------------------------------------------------------
 def build_parser(algo: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=f"Train a {algo.upper()} agent (common.training harness).")
-    p.add_argument("--reward", choices=list(REWARDS), default="default")
+    p.add_argument("--reward", choices=all_reward_names(), default="default",
+                   help="reward preset; SUPPLEMENTARY_REWARDS presets only in a registered supp-<name> run")
     p.add_argument("--density", choices=list(DENSITIES), default=TRAIN_DENSITY, help="training density (protocol: medium)")
     p.add_argument("--seed", type=int, default=0, help=f"run seed (main grid: {TRAIN_SEEDS})")
-    p.add_argument("--variant", default=None, help="run directory level; default: main, or generated from --set")
+    p.add_argument("--variant", default=None,
+                   help="run directory level; default: main, or generated from --set (sensitivity points); "
+                        "tune-<name> for tuning, supp-<name> for a SUPPLEMENTARY_RUNS entry")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
                    help="override one hyperparameter (sensitivity runs); repeatable, recorded in run_meta.json")
     p.add_argument("--workers", type=int, default=1,
@@ -271,7 +284,7 @@ class RunSetup:
     def identity(self) -> dict[str, Any]:
         return {
             "algorithm": self.algo, "train_reward": self.reward, "train_density": self.density, "seed": self.seed,
-            "variant": self.variant, "overridden_keys": self.overridden_keys,
+            "variant": self.variant, "role": variant_role(self.variant), "overridden_keys": self.overridden_keys,
         }
 
 
@@ -305,6 +318,8 @@ def resolve_setup(algo: str, argv: Optional[Sequence[str]] = None) -> RunSetup:
             "val_n_episodes": args.val_episodes, "checkpoint_every_env_steps": args.checkpoint_every,
         }.items() if v is not None
     }
+    # a value equal to the frozen TrainBudget is not an override (it must not turn a result run into a debug run)
+    budget_kw = effective_budget_overrides(budget_kw)
     budget = TrainBudget(**budget_kw)
     if args.variant is not None:
         variant = check_variant(args.variant)
@@ -315,8 +330,8 @@ def resolve_setup(algo: str, argv: Optional[Sequence[str]] = None) -> RunSetup:
     check_budget_fits_trainer(algo, cfg, budget, debug_budget=bool(budget_kw))
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
-    # tuning runs (tune-<name>) and the reserved run seed 99 stay apart from every result run
-    check_run_roles(variant, args.seed, args.reward, args.density, sorted(overrides), sorted(budget_kw))
+    # every run has one role (main, sensitivity point, tune-<name>, registered supp-<name>); seed 99 is reserved for tuning
+    check_run_roles(variant, args.seed, args.reward, args.density, overrides, sorted(budget_kw), algo=algo)
     return RunSetup(
         algo=algo, reward=args.reward, density=args.density, seed=args.seed, variant=variant, cfg=cfg, budget=budget,
         overridden_keys=sorted(overrides), budget_overrides=sorted(budget_kw), workers=args.workers,
@@ -486,10 +501,16 @@ class TrainingRun:
         return False
 
     def _check_against_main_run(self, meta: dict) -> None:
-        """Sensitivity run (one grid parameter overridden, reward / seed of the sensitivity protocol) whose main-grid
-        base run already exists: fail before training if anything but the varied parameter differs. Without a main run
-        yet the check is repeated when the sensitivity table is built (``common.aggregate.check_sensitivity_runs``)."""
+        """Sensitivity run (one grid parameter overridden, reward / seed of the sensitivity protocol) or supplementary run
+        (``supp-<name>``) whose main-grid base run already exists: fail before training if anything but the varied / declared
+        parameters differs. Without a main run yet the check is repeated when the tables are built
+        (``common.aggregate.check_sensitivity_runs`` / ``check_supplementary_runs``)."""
         s = self.setup
+        if is_supplementary_variant(s.variant):
+            base = run_meta_path(s.algo, supplementary_base_reward(s.reward), s.seed, s.root, MAIN_VARIANT)
+            if base.exists():
+                check_supplementary_run(meta, read_meta(base))
+            return
         in_role = (s.variant != MAIN_VARIANT and s.reward == SENSITIVITY_REWARD and s.density == SENSITIVITY_DENSITY
                    and s.seed in SENSITIVITY_SEEDS and len(s.overridden_keys) == 1
                    and s.overridden_keys[0] in SENSITIVITY_GRID.get(s.algo, {}))
@@ -685,3 +706,4 @@ class TrainingRun:
         train_wall = timers.train_wall() - (t["post_training_benchmark_s"] or 0.0)
         t["train_steps_per_s"] = t["final_env_step"] / max(train_wall, 1e-9)
         t["n_episodes"], t["n_updates"], t["n_val_points"] = logger.n_episodes, logger.update_idx, logger.val_idx
+        t["n_gradient_samples"] = logger.sample_idx  # None if a trainer did not report n_samples
