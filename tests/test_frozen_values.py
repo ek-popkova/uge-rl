@@ -58,6 +58,21 @@ def test_budget_and_target_values_are_frozen_and_no_longer_placeholders():
     check_target_performance(TARGET_PERFORMANCE, TARGET_CONSECUTIVE)
 
 
+def test_ppo_defaults_are_frozen_after_tuning():
+    """PPOConfig holds the configuration chosen by tuning (tune-nsteps500, docs/tuning_log.md), with no placeholder left."""
+    cfg = PPOConfig()
+    assert placeholders_in_use(cfg) == []
+    assert {k: getattr(cfg, k) for k in (
+        "lr", "gae_lambda", "clip_range", "n_envs", "n_steps", "n_epochs", "minibatch_size", "ent_coef", "vf_coef",
+        "max_grad_norm", "target_kl", "policy_loss")} == {
+        "lr": 3e-4, "gae_lambda": 0.95, "clip_range": 0.2, "n_envs": 4, "n_steps": 500, "n_epochs": 10,
+        "minibatch_size": 100, "ent_coef": 0.01, "vf_coef": 0.5, "max_grad_norm": 0.5, "target_kl": None,
+        "policy_loss": "clip"}
+    assert cfg.rollout_size == 2000
+    check_budget_matches_rollout(TrainBudget(), cfg.rollout_size)  # 2,000 divides 300,000 and 12,000
+    check_comparable(DDQNConfig(), cfg, TrainBudget())
+
+
 def test_the_strong_level_stays_out_of_reach_of_the_scripted_baselines():
     strong = {c["metric"]: c for c in TARGET_PERFORMANCE["strong"]}
     idle_crash, idle_speed, slower_speed = 0.60, 24.7564, 20.03  # baselines on VAL_SEEDS (docs/config_decisions.md)

@@ -75,7 +75,7 @@ harness `common.training.TrainingRun`, identically for DDQN and PPO.
 | Advantage normalization | per minibatch, `(A - mean) / (std + 1e-8)`, population std | OpenAI baselines ppo2; Andrychowicz et al. 2021 (section 3.3) found per-minibatch advantage normalization to have little effect on performance (not in Engstrom et al. 2020's list) |
 | Advantages per rollout | computed once per rollout, before the first epoch, and kept fixed for all epochs | OpenAI baselines ppo2 / SB3. Andrychowicz et al. 2021 (section 3.5) recommend recomputing them once per pass over the data (stale advantages can hurt); not adopted, so the epochs optimize one fixed objective and the code matches the SB3 calibration |
 | Value loss | `mean((V - returns)^2)`, no value clipping | Andrychowicz et al. 2021: PPO-style value clipping hurt |
-| Gradient clipping | global norm over both networks, `max_grad_norm`; the logged `grad_norm` is the norm before clipping | baselines ppo2 ("global gradient clipping" is item 9 of Engstrom et al. 2020). With the placeholder `max_grad_norm = 0.5` every step is clipped: the pre-clip norms were 5-22 in a 2,000-step smoke run (rollout 500), with one norm over actor and critic together; with Adam this mostly rescales all steps uniformly. Recheck during tuning |
+| Gradient clipping | global norm over both networks, `max_grad_norm`; the logged `grad_norm` is the norm before clipping | baselines ppo2 ("global gradient clipping" is item 9 of Engstrom et al. 2020). With `max_grad_norm = 0.5` (decided: tuning default, not varied) every step is clipped: the pre-clip norms were 5-22 in a 2,000-step smoke run (rollout 500) and 5-24 (per-30k-step means) in the tuning runs, with one norm over actor and critic together; with Adam this mostly rescales all steps uniformly |
 | `grad_norm` / `grad_norm_max` in `update_log.csv` | `grad_norm` = mean over the rollout's minibatch steps; one row per rollout | the logger derives `grad_norm_max` as the max over the calls of a row, and PPO makes one call per rollout, so **for PPO rows `grad_norm_max` equals `grad_norm`**: it does not show spikes inside a rollout (for DDQN, one call per gradient step, it does) |
 | Reward scaling, observation normalization | none | shared decision: the env already normalizes the Kinematics features; no reward scaling, to keep the reward presets comparable |
 | `approx_kl` | k3 estimator `mean((rho - 1) - log rho)` on the sampled actions | the estimator SB3 logs, so the values are comparable with the SB3 calibration (`docs/calibration.md`) |
@@ -90,8 +90,9 @@ clipping is never active. That is the plain advantage actor-critic gradient (wit
 an entropy bonus and advantage normalization).
 
 **Timing.** The forward passes during collection are counted in neither `env_time_s` nor `update_time_s`. GAE and the
-epochs are counted in `update_time_s`. One update with the default config (rollout 1,000, 10 epochs x 10 minibatches)
-takes about 0.5 s on the development laptop, against 20-65 s of simulation per rollout.
+epochs are counted in `update_time_s`. One update with the tuned default config (rollout 2,000, 10 epochs x 20 minibatches)
+took about 1.7 s in the tuning run `tune-nsteps500` (three runs sharing the laptop), against about 95 s of simulation per rollout; the
+updates were under 2% of the wall time.
 
 ## How to run
 
@@ -116,7 +117,7 @@ python -m pytest -m "not slow"                               # whole fast tier
 python -m pytest                                             # full suite, includes the PPO harness runs
 ```
 
-`n_envs * n_steps` must divide 300,000 and 12,000: any divisor of 12,000, e.g. 1,000 (the default 4 x 250), 500, 1,500,
-2,000, 2,400, 3,000, 4,000, 6,000 or 12,000. `minibatch_size` must in turn divide `n_envs * n_steps`.
-`check_budget_matches_rollout` names the nearest valid values. The hyperparameters still marked
-`# PLACEHOLDER: decide before training` in `common/train_config.py` are chosen during tuning (`docs/tuning_log.md`).
+`n_envs * n_steps` must divide 300,000 and 12,000: any divisor of 12,000, e.g. 2,000 (the default 4 x 500), 500, 1,000,
+1,500, 2,400, 3,000, 4,000, 6,000 or 12,000. `minibatch_size` must in turn divide `n_envs * n_steps`.
+`check_budget_matches_rollout` names the nearest valid values. All `PPOConfig` hyperparameters are decided: tuning chose
+`tune-nsteps500` (`docs/tuning_log.md`), and its values are the plain defaults in `common/train_config.py` (no PPO placeholder left).

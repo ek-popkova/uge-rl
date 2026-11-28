@@ -181,7 +181,10 @@ def test_run_meta_has_every_field(runs, key):
     cfg_cls = DDQNConfig if algo == "ddqn" else PPOConfig
     assert cfg_cls.from_dict(meta["hyperparameters"]).to_dict() == meta["hyperparameters"]
     assert meta["budget"]["total_env_steps"] == TOTAL and set(meta["budget_overrides"]) >= {"total_env_steps"}
-    assert any(p.endswith("lr") for p in meta["placeholders_in_use"])
+    if algo == "ddqn":  # DDQN's algorithm-specific values are still placeholders; PPO's were decided by tuning
+        assert any(p.endswith("lr") for p in meta["placeholders_in_use"])
+    else:
+        assert meta["placeholders_in_use"] == []
     # relative hyperparameters are stored as absolute values: DDQN eps_decay_fraction 0.3 x 80 steps, PPO rollout 2 x 10
     assert meta["resolved"] == ({"eps_decay_steps": 24} if algo == "ddqn" else {"rollout_size": 20})
     env = meta["env"]
@@ -333,7 +336,7 @@ def test_main_variant_cannot_carry_overrides():
 
 # ---- config -------------------------------------------------------------------------------------------------------------
 def test_configs_validate_gamma_and_comparable_network_size():
-    DDQNConfig(), PPOConfig(), TrainBudget()  # placeholders are valid
+    DDQNConfig(), PPOConfig(), TrainBudget()  # the defaults (DDQN placeholders included) are valid
     with pytest.raises(ValueError, match="gamma"):
         DDQNConfig(gamma=MIN_GAMMA - 0.01)
     with pytest.raises(ValueError, match="gamma"):
@@ -345,7 +348,7 @@ def test_configs_validate_gamma_and_comparable_network_size():
     check_comparable(DDQNConfig(), PPOConfig())
     with pytest.raises(ValueError):
         PPOConfig(minibatch_size=10_000)
-    with pytest.raises(ValueError, match="must divide"):  # rollout 1,000 / 300 leaves a short last minibatch
+    with pytest.raises(ValueError, match="must divide"):  # rollout 2,000 / 300 leaves a short last minibatch
         PPOConfig(minibatch_size=300)
     with pytest.raises(ValueError, match="must divide"):
         PPOConfig(n_envs=2, n_steps=8, minibatch_size=5)

@@ -210,20 +210,24 @@ class DDQNConfig(_ConfigBase):
 
 @dataclass(frozen=True)
 class PPOConfig(_ConfigBase):
-    """PPO hyperparameters. One rollout has ``n_envs * n_steps`` env steps."""
+    """PPO hyperparameters. One rollout has ``n_envs * n_steps`` env steps.
 
-    lr: float = _ph(3e-4)  # PLACEHOLDER: decide before training
+    The algorithm-specific values are the configuration chosen by tuning (``tune-nsteps500``, ``docs/tuning_log.md``):
+    ``n_steps`` was varied and selected, ``ent_coef`` was varied and kept, the others are the tuning defaults.
+    """
+
+    lr: float = 3e-4  # decided: tuning default, not varied (base of the lr sensitivity grid)
     gamma: float = 0.99  # decided (shared, >= MIN_GAMMA)
-    gae_lambda: float = _ph(0.95)  # PLACEHOLDER: decide before training
-    clip_range: float = _ph(0.2)  # PLACEHOLDER: decide before training
-    n_envs: int = _ph(4)  # PLACEHOLDER: decide before training (vectorized envs, algorithmic)
-    n_steps: int = _ph(250)  # PLACEHOLDER: decide before training (steps per env per rollout)
-    n_epochs: int = _ph(10)  # PLACEHOLDER: decide before training
-    minibatch_size: int = _ph(100)  # PLACEHOLDER: decide before training
-    ent_coef: float = _ph(0.01)  # PLACEHOLDER: decide before training
-    vf_coef: float = _ph(0.5)  # PLACEHOLDER: decide before training
-    max_grad_norm: float = _ph(0.5)  # PLACEHOLDER: decide before training
-    target_kl: Optional[float] = _ph(None)  # PLACEHOLDER: decide before training (None = no early stop)
+    gae_lambda: float = 0.95  # decided: tuning default, not varied
+    clip_range: float = 0.2  # decided: tuning default, not varied (base of the clip_range sensitivity grid)
+    n_envs: int = 4  # decided: tuning default, not varied (vectorized envs, algorithmic)
+    n_steps: int = 500  # decided by tuning (docs/tuning_log.md): steps per env per rollout, rollout 4 x 500 = 2,000
+    n_epochs: int = 10  # decided: tuning default, not varied
+    minibatch_size: int = 100  # decided: tuning default, not varied (20 minibatches per rollout)
+    ent_coef: float = 0.01  # decided by tuning (docs/tuning_log.md): 0.05 was tried and not chosen
+    vf_coef: float = 0.5  # decided: tuning default, not varied
+    max_grad_norm: float = 0.5  # decided: tuning default, not varied
+    target_kl: Optional[float] = None  # decided: tuning default, not varied (None = no KL early stop)
     # Policy loss (report section 3.3): "clip" = PPO-Clip (eq:ppo-clip), "kl" = PPO-KL (adaptive KL penalty). Decided.
     policy_loss: str = "clip"
     # PPO-KL only, decided (the PPO paper's values, not tuned): d_targ of the adaptive KL penalty (Schulman et al. 2017

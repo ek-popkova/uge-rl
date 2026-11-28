@@ -268,11 +268,13 @@ def test_check_supplementary_run_refuses_any_other_difference():
         check_supplementary_run(_supp_meta(a2c), _meta(seed=2))
     with pytest.raises(ValueError, match="main variant"):
         check_supplementary_run(_supp_meta(a2c), _meta(seed=1, variant="clip_range=0.1"))
-    # FromBase is resolved against the MAIN run: a main grid trained with 8 envs makes the a2c minibatch 2,000
+    # FromBase is resolved against the MAIN run: a main grid trained with 8 envs makes the a2c minibatch 8 x n_steps
+    # (4,000 with the tuned n_steps = 500), not the rollout of the current defaults
     tuned_main = _meta(seed=1, hp_changes={"n_envs": 8})
     with pytest.raises(ValueError, match="minibatch_size"):
         check_supplementary_run(_supp_meta(a2c, hp_changes={"n_envs": 8}), tuned_main)
-    check_supplementary_run(_supp_meta(a2c, hp_changes={"n_envs": 8, "minibatch_size": 2000}), tuned_main)
+    resolved = 8 * PPOConfig().n_steps
+    check_supplementary_run(_supp_meta(a2c, hp_changes={"n_envs": 8, "minibatch_size": resolved}), tuned_main)
     with pytest.raises(ValueError, match="not a registered"):
         check_supplementary_run(_meta(variant="supp-nope"), main)
 

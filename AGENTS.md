@@ -101,7 +101,7 @@ The scripts in `scripts/pilot/` were left unfixed on purpose because that run ha
 
 ## Experiment tracking
 
-Infrastructure for DDQN and PPO is in place; PPO is implemented (`ppo/`), DDQN is still a stub. A training run is
+Infrastructure for DDQN and PPO is in place; PPO is implemented (`ppo/`) and tuned (defaults frozen, `docs/tuning_log.md`), DDQN is still a stub. A training run is
 `common.training.TrainingRun` + an algorithm `Trainer` (`ddqn/train.py`, `ppo/train.py`); the harness
 writes every number needed for the report, identically for both algorithms. Details: `README.md`
 (Training), `docs/evaluation_protocol.md` (sections 5, 7, 9, 11).
@@ -193,15 +193,15 @@ No shared item is left: the budget and the target values were frozen after the S
 unreachable for every scripted baseline (`test_no_scripted_baseline_meets_target_performance`); re-run that test after any edit
 of `common/config.py`.
 
-Only the algorithm-specific hyperparameters below remain. They are still PLACEHOLDERs (`# PLACEHOLDER: decide before training`):
+Only the DDQN algorithm-specific hyperparameters below remain. They are still PLACEHOLDERs (`# PLACEHOLDER: decide before training`):
 a conventional value that only keeps the code runnable, not a tuned one. The harness prints `placeholders_in_use` at start and
-stores it in `run_meta.json`. Each owner chooses them during tuning within the tuning budget above and then replaces `_ph(...)`
-by a plain default in `common/train_config.py`:
+stores it in `run_meta.json`. The owner chooses them during tuning within the tuning budget above and then replaces `_ph(...)`
+by a plain default in `common/train_config.py`. The PPO values are decided (tuning finished, row below):
 
 | Item | Where | What it affects |
 |---|---|---|
 | DDQN: `lr, buffer_size, batch_size, learning_starts, train_freq, gradient_steps, target_update_interval, tau, eps_start, eps_end, eps_decay_fraction (0.3), max_grad_norm` | `DDQNConfig` | final performance and stability. `lr` and `eps_decay_fraction` are the bases of their sensitivity grids (eps base must stay in (0.2, 0.8]) |
-| PPO: `lr, gae_lambda, clip_range, n_envs, n_steps, n_epochs, minibatch_size, ent_coef, vf_coef, max_grad_norm, target_kl` (decided, not placeholders: `policy_loss = "clip"`, `"kl"` for the PPO-KL variant, and the PPO-KL values of the PPO paper `kl_target = 0.01`, `kl_beta_init = 1.0`) | `PPOConfig` | same; `n_envs * n_steps` is the rollout size and the step granularity and **must divide both 300,000 and 12,000** (`total_env_steps` and `val_every_env_steps`; any divisor of 12,000, for example 1,000, 2,000, 3,000, 4,000, 6,000, 12,000), otherwise PPO overshoots the budget or validates at shifted steps; `check_budget_matches_rollout` raises and names the nearest valid values, so keep this in mind when choosing `n_envs` and `n_steps` during tuning. `lr` and `clip_range` are the bases of their sensitivity grids (clip base must stay in (0.1, 0.9)) |
+| PPO: **DECIDED by tuning** (`docs/tuning_log.md`, chosen `tune-nsteps500`; no PPO placeholder left, pinned by `tests/test_frozen_values.py::test_ppo_defaults_are_frozen_after_tuning`): `lr = 3e-4`, `gae_lambda = 0.95`, `clip_range = 0.2`, `n_envs = 4`, `n_steps = 500` (rollout 2,000), `n_epochs = 10`, `minibatch_size = 100`, `ent_coef = 0.01`, `vf_coef = 0.5`, `max_grad_norm = 0.5`, `target_kl = None`; also decided: `policy_loss = "clip"` (`"kl"` for the PPO-KL variant), `kl_target = 0.01`, `kl_beta_init = 1.0` | `PPOConfig` | frozen like the shared decisions: a change is reported as a deviation. The rollout `n_envs * n_steps` = 2,000 divides 300,000 and 12,000 (`check_budget_matches_rollout`). `lr` 3e-4 and `clip_range` 0.2 are the bases of their sensitivity grids (PPO: lr 1e-4 / 9e-4, clip 0.1 / 0.3); `supp-a2c` resolves `minibatch_size` to 2,000. All four tuning configurations drove at about 21 m/s with 0 crashes and reached neither target level |
 
 Runtime implication. Aggregate throughput here is about 140 env steps/s with 8-12 processes (80-180 depending on
 the session, `docs/performance_analysis.md` C5, C8), so every 1 M simulated steps cost about 2 h. One

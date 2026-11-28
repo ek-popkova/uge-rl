@@ -62,11 +62,13 @@ def test_shared_decisions_are_frozen_and_equal_for_both_algorithms():
     assert p.ppo_shared_trunk is False  # separate actor and critic
     assert TrainBudget().milestone_fractions == (0.1, 0.25, 0.5)
     check_comparable(d, p)
-    # none of the decided values is a placeholder any more; the rest still is
+    # none of the decided values is a placeholder any more; DDQN's algorithm-specific values still are,
+    # PPO's were decided by tuning (docs/tuning_log.md)
     for cls in (DDQNConfig, PPOConfig):
         names = {n.split(".")[1] for n in placeholders_in_use(cls())}
         assert not names & {"gamma", "hidden_sizes", "activation", "obs_flatten", "ppo_shared_trunk", "device"}
-        assert {"lr", "max_grad_norm"} <= names
+    assert {"lr", "max_grad_norm"} <= {n.split(".")[1] for n in placeholders_in_use(DDQNConfig())}
+    assert placeholders_in_use(PPOConfig()) == []
     # the budget is frozen after the calibration (tests/test_frozen_values.py); only algorithm-specific values are placeholders
     assert placeholders_in_use(TrainBudget()) == []
     assert TrainBudget().checkpoint_every_env_steps == 10_000
@@ -237,7 +239,7 @@ def test_sensitivity_grid_expands_to_24_runs_skipping_the_base_values():
     for r in runs:
         by_setting.setdefault((r.algo, r.variant), []).append(r.seed)
     assert all(seeds == SENSITIVITY_SEEDS for seeds in by_setting.values())  # 3 seeds per setting
-    # absolute values for the CURRENT placeholder bases (lr 5e-4 / 3e-4, eps_decay_fraction 0.3, clip_range 0.2)
+    # absolute values for the CURRENT bases (DDQN placeholders lr 5e-4, eps_decay_fraction 0.3; PPO decided lr 3e-4, clip_range 0.2)
     assert sorted(by_setting) == sorted([
         ("ddqn", "lr=0.000166667"), ("ddqn", "lr=0.0015"),
         ("ddqn", "eps_decay_fraction=0.1"), ("ddqn", "eps_decay_fraction=0.5"),
@@ -312,7 +314,7 @@ def test_eps_decay_fraction_is_resolved_to_absolute_steps():
     assert [cfg.eps_decay_steps(n) for n in (100_000, 150_000, 200_000, 300_000)] == [30_000, 45_000, 60_000, 90_000]
     assert DDQNConfig(eps_decay_fraction=1e-9).eps_decay_steps(1000) == 1  # never 0
     assert resolve_hyperparameters(cfg, TrainBudget(total_env_steps=200_000)) == {"eps_decay_steps": 60_000}
-    assert resolve_hyperparameters(PPOConfig(), TrainBudget()) == {"rollout_size": 1000}
+    assert resolve_hyperparameters(PPOConfig(), TrainBudget()) == {"rollout_size": 2000}
     for bad in (0.0, -0.1, 1.01):
         with pytest.raises(ValueError, match="eps_decay_fraction"):
             DDQNConfig(eps_decay_fraction=bad)
